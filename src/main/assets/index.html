@@ -20,11 +20,47 @@
 <body>
 <div id="app"></div>
 <script>
-var PREGUNTAS = [
-  { t: "Pregunta de prueba 1: elige la opción B", o: ["Opción A", "Opción B", "Opción C", "Opción D"], c: 1 },
-  { t: "Pregunta de prueba 2: elige la opción D", o: ["Opción A", "Opción B", "Opción C", "Opción D"], c: 3 },
-  { t: "Pregunta de prueba 3: elige la opción A", o: ["Opción A", "Opción B", "Opción C", "Opción D"], c: 0 }
-];
+// ---- Conexión con Supabase ----
+// La clave "anon"/"publishable" está pensada para ir en el cliente: por sí sola
+// no permite hacer nada que las políticas de RLS en la base de datos no permitan
+// (aquí: leer solo preguntas activas, e insertar resultados, nada más).
+var SUPABASE_URL = "https://juvqvshcfsrtscvzluaa.supabase.co";
+var SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp1dnF2c2hjZnNydHNjdnpsdWFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAzMDY4NjQsImV4cCI6MjEwNTg4Mjg2NH0.aL2bzJbTJ6DfzUlh8UaSBZ5Fah3Bae1tNBDi7R6BD68";
+
+function cargarPreguntas() {
+  var url = SUPABASE_URL + "/rest/v1/preguntas?select=texto,opciones,correcta&activa=eq.true&order=orden.asc";
+  return fetch(url, {
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: "Bearer " + SUPABASE_ANON_KEY
+    }
+  }).then(function (resp) {
+    if (!resp.ok) throw new Error("No se pudieron cargar las preguntas");
+    return resp.json();
+  }).then(function (filas) {
+    return filas.map(function (f) { return { t: f.texto, o: f.opciones, c: f.correcta }; });
+  });
+}
+
+function guardarResultado(nombreAlumno, correctas, total, respuestas) {
+  var url = SUPABASE_URL + "/rest/v1/resultados";
+  return fetch(url, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: "Bearer " + SUPABASE_ANON_KEY,
+      "Content-Type": "application/json",
+      Prefer: "return=minimal"
+    },
+    body: JSON.stringify({ nombre: nombreAlumno, correctas: correctas, total: total, respuestas: respuestas })
+  }).catch(function (e) {
+    // Si falla el guardado (sin conexión, etc.) no debe impedir que el alumno vea su resultado.
+    console.log("No se pudo guardar el resultado", e);
+  });
+}
+
+// ---- Estado y pantallas ----
+var PREGUNTAS = [];
 var app = document.getElementById("app");
 var nombre = "", idx = 0, resp = [];
 
@@ -45,6 +81,7 @@ function inicio() {
   var inp = el("input");
   inp.type = "text";
   inp.setAttribute("autocomplete", "off");
+  inp.value = nombre;
   c.appendChild(inp);
   c.appendChild(el("p", "Al comenzar no podrás salir, minimizar, cambiar de pantalla ni tomar capturas. Si lo haces, el examen se cierra y deberás empezar de nuevo.", "aviso"));
   var msg = el("p", "", "aviso");
@@ -54,11 +91,22 @@ function inicio() {
     if (inp.value.trim().length < 3) { msg.textContent = "Escribe tu nombre."; return; }
     nombre = inp.value.trim();
     inp.blur();
-    setTimeout(function () {
-      if (window.Android) Android.iniciarExamen();
-      idx = 0; resp = [];
-      pregunta();
-    }, 300);
+    b.disabled = true;
+    b.textContent = "Cargando preguntas...";
+    msg.textContent = "";
+    cargarPreguntas().then(function (preguntas) {
+      if (!preguntas.length) throw new Error("No hay preguntas activas");
+      PREGUNTAS = preguntas;
+      setTimeout(function () {
+        if (window.Android) Android.iniciarExamen();
+        idx = 0; resp = [];
+        pregunta();
+      }, 300);
+    }).catch(function () {
+      msg.textContent = "No se pudieron cargar las preguntas. Revisa tu conexión e inténtalo de nuevo.";
+      b.disabled = false;
+      b.textContent = "Comenzar examen";
+    });
   };
   c.appendChild(b);
   pantalla(c);
@@ -92,9 +140,10 @@ function fin() {
   if (window.Android) Android.terminarExamen();
   var bien = 0;
   PREGUNTAS.forEach(function (p, i) { if (resp[i] === p.c) bien++; });
+  guardarResultado(nombre, bien, PREGUNTAS.length, resp);
   var c = el("div", "", "card");
   c.appendChild(el("h1", "Examen terminado"));
-  c.appendChild(el("p", nombre + ": " + bien + " de " + PREGUNTAS.length + " correctas (prueba)"));
+  c.appendChild(el("p", nombre + ": " + bien + " de " + PREGUNTAS.length + " correctas"));
   var b = el("button", "Salir");
   b.onclick = function () { if (window.Android) Android.salir(); else inicio(); };
   c.appendChild(b);

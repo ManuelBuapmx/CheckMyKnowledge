@@ -15,6 +15,21 @@
   button:disabled { opacity: .4; }
   input { width: 100%; padding: 12px; font-size: 16px; border: 2px solid #ccc; border-radius: 10px; -webkit-user-select: text; user-select: text; }
   .aviso { font-size: 14px; color: #b71c1c; }
+  /* --- Contexto por pregunta (video embebido o texto de apoyo/lectura) ---
+     El video SIEMPRE va embebido (iframe), nunca como link externo: un link
+     que abra YouTube fuera de la app cancelaría el examen (ver anularExamen()
+     en MainActivity.java — onPause()/onWindowFocusChanged() cierran la app si
+     pierde el foco). */
+  .video-envoltorio {
+    position: relative; width: 100%; padding-bottom: 56.25%; height: 0;
+    margin-bottom: 12px; border-radius: 8px; overflow: hidden; background: #000;
+  }
+  .video-envoltorio iframe { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0; }
+  .contexto-texto {
+    background: #eef4fb; border-left: 4px solid #1565c0; border-radius: 6px;
+    padding: 10px 12px; margin-bottom: 12px; font-size: 14px; line-height: 1.4;
+    white-space: pre-wrap; -webkit-user-select: text; user-select: text;
+  }
 </style>
 </head>
 <body>
@@ -28,7 +43,12 @@ var SUPABASE_URL = "https://juvqvshcfsrtscvzluaa.supabase.co";
 var SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp1dnF2c2hjZnNydHNjdnpsdWFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAzMDY4NjQsImV4cCI6MjEwNTg4Mjg2NH0.aL2bzJbTJ6DfzUlh8UaSBZ5Fah3Bae1tNBDi7R6BD68";
 
 function cargarPreguntas() {
-  var url = SUPABASE_URL + "/rest/v1/preguntas?select=texto,opciones,correcta&activa=eq.true&order=orden.asc";
+  // NOTA: "contexto" es la columna nueva (ver migracion_contexto.sql en la
+  // raíz del repo) — texto libre por pregunta que puede traer instrucciones,
+  // un pasaje de lectura, o un link de YouTube. Si esta columna no existe
+  // todavía en tu tabla "preguntas", Supabase regresa error 400 acá; corre la
+  // migración antes de usar exámenes que dependan de esto.
+  var url = SUPABASE_URL + "/rest/v1/preguntas?select=texto,opciones,correcta,contexto&activa=eq.true&order=orden.asc";
   return fetch(url, {
     headers: {
       apikey: SUPABASE_ANON_KEY,
@@ -38,7 +58,7 @@ function cargarPreguntas() {
     if (!resp.ok) throw new Error("No se pudieron cargar las preguntas");
     return resp.json();
   }).then(function (filas) {
-    return filas.map(function (f) { return { t: f.texto, o: f.opciones, c: f.correcta }; });
+    return filas.map(function (f) { return { t: f.texto, o: f.opciones, c: f.correcta, x: f.contexto || null }; });
   });
 }
 
@@ -57,6 +77,16 @@ function guardarResultado(nombreAlumno, correctas, total, respuestas) {
     // Si falla el guardado (sin conexión, etc.) no debe impedir que el alumno vea su resultado.
     console.log("No se pudo guardar el resultado", e);
   });
+}
+
+// Busca un link de YouTube (youtube.com/watch?v=, youtu.be/, o ya en formato
+// /embed/) dentro de un texto libre y regresa solo el ID del video, o null si
+// no encuentra ninguno. Se usa para decidir si el "contexto" de una pregunta
+// se muestra como video embebido o como bloque de texto plano.
+function extraerIdYoutube(texto) {
+  if (!texto) return null;
+  var m = /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([A-Za-z0-9_-]{6,})/.exec(texto);
+  return m ? m[1] : null;
 }
 
 // ---- Estado y pantallas ----
@@ -112,10 +142,34 @@ function inicio() {
   pantalla(c);
 }
 
+// Arma el bloque de "contexto" que va arriba de la pregunta (si la pregunta
+// trae uno): video de YouTube embebido si se detecta un link, o un bloque de
+// texto plano si no (instrucciones, pasaje de lectura, etc.). Se reconstruye
+// en cada pregunta, así que si varias preguntas seguidas comparten el mismo
+// contexto (por ejemplo, todo un pasaje de lectura), se repite en cada una
+// — así lo pidió el profesor, para que el alumno no tenga que ir y venir.
+function bloqueContexto(p) {
+  if (!p.x) return null;
+  var idVideo = extraerIdYoutube(p.x);
+  if (idVideo) {
+    var envoltorio = el("div", "", "video-envoltorio");
+    var iframe = document.createElement("iframe");
+    iframe.src = "https://www.youtube.com/embed/" + idVideo;
+    iframe.setAttribute("frameborder", "0");
+    iframe.setAttribute("allow", "accelerometer; encrypted-media; gyroscope; picture-in-picture");
+    iframe.setAttribute("allowfullscreen", "");
+    envoltorio.appendChild(iframe);
+    return envoltorio;
+  }
+  return el("div", p.x, "contexto-texto");
+}
+
 function pregunta() {
   var p = PREGUNTAS[idx];
   var c = el("div", "", "card");
   c.appendChild(el("p", "Pregunta " + (idx + 1) + " de " + PREGUNTAS.length));
+  var contexto = bloqueContexto(p);
+  if (contexto) c.appendChild(contexto);
   c.appendChild(el("h1", p.t));
   var sig = el("button", idx + 1 < PREGUNTAS.length ? "Siguiente" : "Terminar");
   sig.disabled = resp[idx] === undefined;

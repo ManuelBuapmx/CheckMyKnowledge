@@ -1,6 +1,10 @@
 package com.prismalmesh.checkmyknowledge;
 
 import android.app.Activity;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
 import android.os.Bundle;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
@@ -14,6 +18,39 @@ public class MainActivity extends Activity {
     private WebView webView;
     private volatile boolean examenActivo = false;
 
+    // --- Detección de "celular pegado a la pantalla" ---
+    // No usamos cámara + IA para esto: es más pesado, menos confiable (falsos
+    // positivos con la mano, la funda, poca luz) y capturar video de la cara
+    // de un menor trae temas de privacidad que no vale la pena abrir aquí.
+    // El sensor de proximidad (el mismo que apaga la pantalla en llamadas)
+    // resuelve justo este caso: si algo queda pegado/muy cerca de la parte de
+    // arriba de la pantalla por un rato, seguramente le taparon el sensor.
+    private SensorManager sensorManager;
+    private Sensor sensorProximidad;
+    private long cercaDesdeMs = 0L;
+    private static final long UMBRAL_CERCA_MS = 800; // tiene que estar "cerca" sostenido, no solo un roce
+
+    private final SensorEventListener escuchaProximidad = new SensorEventListener() {
+        @Override
+        public void onSensorChanged(SensorEvent event) {
+            if (!examenActivo || sensorProximidad == null) { cercaDesdeMs = 0L; return; }
+            boolean cerca = event.values.length > 0 && event.values[0] < sensorProximidad.getMaximumRange();
+            long ahora = System.currentTimeMillis();
+            if (cerca) {
+                if (cercaDesdeMs == 0L) cercaDesdeMs = ahora;
+                else if (ahora - cercaDesdeMs >= UMBRAL_CERCA_MS) {
+                    cercaDesdeMs = 0L;
+                    if (examenActivo) anularExamen();
+                }
+            } else {
+                cercaDesdeMs = 0L;
+            }
+        }
+
+        @Override
+        public void onAccuracyChanged(Sensor sensor, int accuracy) { }
+    };
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -22,6 +59,11 @@ public class MainActivity extends Activity {
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE,
                 WindowManager.LayoutParams.FLAG_SECURE);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+        sensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
+        sensorProximidad = sensorManager.getDefaultSensor(Sensor.TYPE_PROXIMITY);
+        // Si el equipo no trae sensor de proximidad, sensorProximidad queda null
+        // y simplemente no se activa esta defensa en ese equipo (no truena nada).
 
         webView = new WebView(this);
         setContentView(webView);
@@ -45,13 +87,21 @@ public class MainActivity extends Activity {
 
     public class Puente {
         @JavascriptInterface
-        public void iniciarExamen() { examenActivo = true; }
+        public void iniciarExamen() { examenActivo = true; cercaDesdeMs = 0L; }
 
         @JavascriptInterface
-        public void terminarExamen() { examenActivo = false; }
+        public void terminarExamen() { examenActivo = false; cercaDesdeMs = 0L; }
 
         @JavascriptInterface
         public void salir() { runOnUiThread(() -> finishAndRemoveTask()); }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (sensorProximidad != null) {
+            sensorManager.registerListener(escuchaProximidad, sensorProximidad, SensorManager.SENSOR_DELAY_UI);
+        }
     }
 
     // Si pierde el foco (notificaciones, ventana flotante, etc.) durante el examen
@@ -65,6 +115,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        sensorManager.unregisterListener(escuchaProximidad);
         if (examenActivo) anularExamen();
     }
 

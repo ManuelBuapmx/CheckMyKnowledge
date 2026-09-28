@@ -42,13 +42,20 @@
 var SUPABASE_URL = "https://juvqvshcfsrtscvzluaa.supabase.co";
 var SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp1dnF2c2hjZnNydHNjdnpsdWFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAzMDY4NjQsImV4cCI6MjEwNTg4Mjg2NH0.aL2bzJbTJ6DfzUlh8UaSBZ5Fah3Bae1tNBDi7R6BD68";
 
-function cargarPreguntas() {
-  // NOTA: "contexto" es la columna nueva (ver migracion_contexto.sql en la
-  // raíz del repo) — texto libre por pregunta que puede traer instrucciones,
-  // un pasaje de lectura, o un link de YouTube. Si esta columna no existe
-  // todavía en tu tabla "preguntas", Supabase regresa error 400 acá; corre la
-  // migración antes de usar exámenes que dependan de esto.
-  var url = SUPABASE_URL + "/rest/v1/preguntas?select=texto,opciones,correcta,contexto&activa=eq.true&order=orden.asc";
+function cargarMaterias() {
+  var url = SUPABASE_URL + "/rest/v1/materias?select=id,nombre&activa=eq.true&order=orden.asc";
+  return fetch(url, {
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + SUPABASE_ANON_KEY }
+  }).then(function (resp) {
+    if (!resp.ok) throw new Error("No se pudieron cargar las materias");
+    return resp.json();
+  });
+}
+
+function cargarPreguntas(materiaId) {
+  // Ya NO se pide la respuesta correcta aquí — el servidor no la entrega a este
+  // rol (anon). La calificación se hace del lado seguro, ver calificarExamen().
+  var url = SUPABASE_URL + "/rest/v1/preguntas?select=texto,opciones,contexto&activa=eq.true&materia_id=eq." + materiaId + "&order=orden.asc";
   return fetch(url, {
     headers: {
       apikey: SUPABASE_ANON_KEY,
@@ -58,24 +65,26 @@ function cargarPreguntas() {
     if (!resp.ok) throw new Error("No se pudieron cargar las preguntas");
     return resp.json();
   }).then(function (filas) {
-    return filas.map(function (f) { return { t: f.texto, o: f.opciones, c: f.correcta, x: f.contexto || null }; });
+    return filas.map(function (f) { return { t: f.texto, o: f.opciones, x: f.contexto || null }; });
   });
 }
 
-function guardarResultado(nombreAlumno, correctas, total, respuestas) {
-  var url = SUPABASE_URL + "/rest/v1/resultados";
+// La calificación se calcula en el servidor (función calificar_examen), que es
+// la única que puede leer cuál era la opción correcta. El cliente nunca la ve,
+// ni antes ni después: solo recibe el resultado ya calculado.
+function calificarExamen(materiaId, nombreAlumno, respuestas) {
+  var url = SUPABASE_URL + "/rest/v1/rpc/calificar_examen";
   return fetch(url, {
     method: "POST",
     headers: {
       apikey: SUPABASE_ANON_KEY,
       Authorization: "Bearer " + SUPABASE_ANON_KEY,
-      "Content-Type": "application/json",
-      Prefer: "return=minimal"
+      "Content-Type": "application/json"
     },
-    body: JSON.stringify({ nombre: nombreAlumno, correctas: correctas, total: total, respuestas: respuestas })
-  }).catch(function (e) {
-    // Si falla el guardado (sin conexión, etc.) no debe impedir que el alumno vea su resultado.
-    console.log("No se pudo guardar el resultado", e);
+    body: JSON.stringify({ p_materia_id: materiaId, p_nombre: nombreAlumno, p_respuestas: respuestas })
+  }).then(function (resp) {
+    if (!resp.ok) return resp.text().then(function (t) { throw new Error(t || "No se pudo calificar el examen"); });
+    return resp.json();
   });
 }
 
@@ -90,6 +99,8 @@ function extraerIdYoutube(texto) {
 }
 
 // ---- Estado y pantallas ----
+var MATERIAS = [];
+var materiaId = null;
 var PREGUNTAS = [];
 var app = document.getElementById("app");
 var nombre = "", idx = 0, resp = [];
@@ -103,6 +114,38 @@ function el(tag, texto, clase) {
   return e;
 }
 function pantalla(card) { app.innerHTML = ""; app.appendChild(card); }
+
+function elegirMateria() {
+  var c = el("div", "", "card");
+  c.appendChild(el("h1", "CheckMyKnowledge"));
+  c.appendChild(el("p", "Cargando materias disponibles..."));
+  pantalla(c);
+  cargarMaterias().then(function (filas) {
+    MATERIAS = filas;
+    var c2 = el("div", "", "card");
+    c2.appendChild(el("h1", "CheckMyKnowledge"));
+    if (!MATERIAS.length) {
+      c2.appendChild(el("p", "No hay ningún examen disponible en este momento. Pregúntale a tu profesor.", "aviso"));
+      pantalla(c2);
+      return;
+    }
+    c2.appendChild(el("p", "Elige la materia:"));
+    MATERIAS.forEach(function (m) {
+      var b = el("button", m.nombre);
+      b.onclick = function () { materiaId = m.id; inicio(); };
+      c2.appendChild(b);
+    });
+    pantalla(c2);
+  }).catch(function () {
+    var c3 = el("div", "", "card");
+    c3.appendChild(el("h1", "CheckMyKnowledge"));
+    c3.appendChild(el("p", "No se pudo conectar. Revisa tu conexión e inténtalo de nuevo.", "aviso"));
+    var b = el("button", "Reintentar");
+    b.onclick = elegirMateria;
+    c3.appendChild(b);
+    pantalla(c3);
+  });
+}
 
 function inicio() {
   var c = el("div", "", "card");
@@ -124,7 +167,7 @@ function inicio() {
     b.disabled = true;
     b.textContent = "Cargando preguntas...";
     msg.textContent = "";
-    cargarPreguntas().then(function (preguntas) {
+    cargarPreguntas(materiaId).then(function (preguntas) {
       if (!preguntas.length) throw new Error("No hay preguntas activas");
       PREGUNTAS = preguntas;
       setTimeout(function () {
@@ -192,19 +235,34 @@ function pregunta() {
 
 function fin() {
   if (window.Android) Android.terminarExamen();
-  var bien = 0;
-  PREGUNTAS.forEach(function (p, i) { if (resp[i] === p.c) bien++; });
-  guardarResultado(nombre, bien, PREGUNTAS.length, resp);
   var c = el("div", "", "card");
-  c.appendChild(el("h1", "Examen terminado"));
-  c.appendChild(el("p", nombre + ": " + bien + " de " + PREGUNTAS.length + " correctas"));
-  var b = el("button", "Salir");
-  b.onclick = function () { if (window.Android) Android.salir(); else inicio(); };
-  c.appendChild(b);
+  c.appendChild(el("h1", "Calificando..."));
+  c.appendChild(el("p", "Espera un momento."));
   pantalla(c);
+  intentarCalificar();
 }
 
-inicio();
+function intentarCalificar() {
+  calificarExamen(materiaId, nombre, resp).then(function (resultado) {
+    var c = el("div", "", "card");
+    c.appendChild(el("h1", "Examen terminado"));
+    c.appendChild(el("p", nombre + ": " + resultado.correctas + " de " + resultado.total + " correctas"));
+    var b = el("button", "Salir");
+    b.onclick = function () { if (window.Android) Android.salir(); else elegirMateria(); };
+    c.appendChild(b);
+    pantalla(c);
+  }).catch(function () {
+    var c = el("div", "", "card");
+    c.appendChild(el("h1", "No se pudo calificar"));
+    c.appendChild(el("p", "Revisa tu conexión e inténtalo de nuevo. Tus respuestas no se han perdido.", "aviso"));
+    var b = el("button", "Reintentar");
+    b.onclick = intentarCalificar;
+    c.appendChild(b);
+    pantalla(c);
+  });
+}
+
+elegirMateria();
 </script>
 </body>
 </html>

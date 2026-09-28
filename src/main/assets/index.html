@@ -1,268 +1,138 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CheckMyKnowledge</title>
-<style>
-  * { box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
-  body { margin: 0; padding: 16px; font-family: sans-serif; background: #f5f5f5; color: #222; }
-  h1 { font-size: 20px; }
-  .card { background: #fff; border-radius: 12px; padding: 16px; }
-  button { width: 100%; padding: 14px; margin-top: 10px; font-size: 16px; border: 0; border-radius: 10px; background: #1565c0; color: #fff; }
-  button.op { background: #fff; color: #222; border: 2px solid #ccc; text-align: left; }
-  button.op.sel { border-color: #1565c0; background: #e3f2fd; }
-  button:disabled { opacity: .4; }
-  input { width: 100%; padding: 12px; font-size: 16px; border: 2px solid #ccc; border-radius: 10px; -webkit-user-select: text; user-select: text; }
-  .aviso { font-size: 14px; color: #b71c1c; }
-  /* --- Contexto por pregunta (video embebido o texto de apoyo/lectura) ---
-     El video SIEMPRE va embebido (iframe), nunca como link externo: un link
-     que abra YouTube fuera de la app cancelaría el examen (ver anularExamen()
-     en MainActivity.java — onPause()/onWindowFocusChanged() cierran la app si
-     pierde el foco). */
-  .video-envoltorio {
-    position: relative; width: 100%; padding-bottom: 56.25%; height: 0;
-    margin-bottom: 12px; border-radius: 8px; overflow: hidden; background: #000;
-  }
-  .video-envoltorio iframe { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0; }
-  .contexto-texto {
-    background: #eef4fb; border-left: 4px solid #1565c0; border-radius: 6px;
-    padding: 10px 12px; margin-bottom: 12px; font-size: 14px; line-height: 1.4;
-    white-space: pre-wrap; -webkit-user-select: text; user-select: text;
-  }
-</style>
-</head>
-<body>
-<div id="app"></div>
-<script>
-// ---- Conexión con Supabase ----
-// La clave "anon"/"publishable" está pensada para ir en el cliente: por sí sola
-// no permite hacer nada que las políticas de RLS en la base de datos no permitan
-// (aquí: leer solo preguntas activas, e insertar resultados, nada más).
-var SUPABASE_URL = "https://juvqvshcfsrtscvzluaa.supabase.co";
-var SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp1dnF2c2hjZnNydHNjdnpsdWFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAzMDY4NjQsImV4cCI6MjEwNTg4Mjg2NH0.aL2bzJbTJ6DfzUlh8UaSBZ5Fah3Bae1tNBDi7R6BD68";
+package com.prismalmesh.checkmyknowledge;
 
-function cargarMaterias() {
-  var url = SUPABASE_URL + "/rest/v1/materias?select=id,nombre&activa=eq.true&order=orden.asc";
-  return fetch(url, {
-    headers: { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + SUPABASE_ANON_KEY }
-  }).then(function (resp) {
-    if (!resp.ok) throw new Error("No se pudieron cargar las materias");
-    return resp.json();
-  });
-}
+import android.app.Activity;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
+import android.os.Bundle;
+import android.view.WindowManager;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 
-function cargarPreguntas(materiaId) {
-  // Ya NO se pide la respuesta correcta aquí — el servidor no la entrega a este
-  // rol (anon). La calificación se hace del lado seguro, ver calificarExamen().
-  var url = SUPABASE_URL + "/rest/v1/preguntas?select=texto,opciones,contexto&activa=eq.true&materia_id=eq." + materiaId + "&order=orden.asc";
-  return fetch(url, {
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: "Bearer " + SUPABASE_ANON_KEY
-    }
-  }).then(function (resp) {
-    if (!resp.ok) throw new Error("No se pudieron cargar las preguntas");
-    return resp.json();
-  }).then(function (filas) {
-    return filas.map(function (f) { return { t: f.texto, o: f.opciones, x: f.contexto || null }; });
-  });
-}
+public class MainActivity extends Activity {
 
-// La calificación se calcula en el servidor (función calificar_examen), que es
-// la única que puede leer cuál era la opción correcta. El cliente nunca la ve,
-// ni antes ni después: solo recibe el resultado ya calculado.
-function calificarExamen(materiaId, nombreAlumno, respuestas) {
-  var url = SUPABASE_URL + "/rest/v1/rpc/calificar_examen";
-  return fetch(url, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: "Bearer " + SUPABASE_ANON_KEY,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ p_materia_id: materiaId, p_nombre: nombreAlumno, p_respuestas: respuestas })
-  }).then(function (resp) {
-    if (!resp.ok) return resp.text().then(function (t) { throw new Error(t || "No se pudo calificar el examen"); });
-    return resp.json();
-  });
-}
+    private WebView webView;
+    private volatile boolean examenActivo = false;
 
-// Busca un link de YouTube (youtube.com/watch?v=, youtu.be/, o ya en formato
-// /embed/) dentro de un texto libre y regresa solo el ID del video, o null si
-// no encuentra ninguno. Se usa para decidir si el "contexto" de una pregunta
-// se muestra como video embebido o como bloque de texto plano.
-function extraerIdYoutube(texto) {
-  if (!texto) return null;
-  var m = /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([A-Za-z0-9_-]{6,})/.exec(texto);
-  return m ? m[1] : null;
-}
+    // --- Detección de "celular pegado a la pantalla" ---
+    // No usamos cámara + IA para esto: es más pesado, menos confiable (falsos
+    // positivos con la mano, la funda, poca luz) y capturar video de la cara
+    // de un menor trae temas de privacidad que no vale la pena abrir aquí.
+    // El sensor de proximidad (el mismo que apaga la pantalla en llamadas)
+    // resuelve justo este caso: si algo queda pegado/muy cerca de la parte de
+    // arriba de la pantalla por un rato, seguramente le taparon el sensor.
+    private SensorManager sensorManager;
+    private Sensor sensorProximidad;
+    private long cercaDesdeMs = 0L;
+    private static final long UMBRAL_CERCA_MS = 800; // tiene que estar "cerca" sostenido, no solo un roce
 
-// ---- Estado y pantallas ----
-var MATERIAS = [];
-var materiaId = null;
-var PREGUNTAS = [];
-var app = document.getElementById("app");
-var nombre = "", idx = 0, resp = [];
+    private final SensorEventListener escuchaProximidad = new SensorEventListener() {
+        @Override
+        public void onSensorChanged(SensorEvent event) {
+            if (!examenActivo || sensorProximidad == null) { cercaDesdeMs = 0L; return; }
+            boolean cerca = event.values.length > 0 && event.values[0] < sensorProximidad.getMaximumRange();
+            long ahora = System.currentTimeMillis();
+            if (cerca) {
+                if (cercaDesdeMs == 0L) cercaDesdeMs = ahora;
+                else if (ahora - cercaDesdeMs >= UMBRAL_CERCA_MS) {
+                    cercaDesdeMs = 0L;
+                    if (examenActivo) anularExamen();
+                }
+            } else {
+                cercaDesdeMs = 0L;
+            }
+        }
 
-document.addEventListener("contextmenu", function (e) { e.preventDefault(); });
-
-function el(tag, texto, clase) {
-  var e = document.createElement(tag);
-  if (texto) e.textContent = texto;
-  if (clase) e.className = clase;
-  return e;
-}
-function pantalla(card) { app.innerHTML = ""; app.appendChild(card); }
-
-function elegirMateria() {
-  var c = el("div", "", "card");
-  c.appendChild(el("h1", "CheckMyKnowledge"));
-  c.appendChild(el("p", "Cargando materias disponibles..."));
-  pantalla(c);
-  cargarMaterias().then(function (filas) {
-    MATERIAS = filas;
-    var c2 = el("div", "", "card");
-    c2.appendChild(el("h1", "CheckMyKnowledge"));
-    if (!MATERIAS.length) {
-      c2.appendChild(el("p", "No hay ningún examen disponible en este momento. Pregúntale a tu profesor.", "aviso"));
-      pantalla(c2);
-      return;
-    }
-    c2.appendChild(el("p", "Elige la materia:"));
-    MATERIAS.forEach(function (m) {
-      var b = el("button", m.nombre);
-      b.onclick = function () { materiaId = m.id; inicio(); };
-      c2.appendChild(b);
-    });
-    pantalla(c2);
-  }).catch(function () {
-    var c3 = el("div", "", "card");
-    c3.appendChild(el("h1", "CheckMyKnowledge"));
-    c3.appendChild(el("p", "No se pudo conectar. Revisa tu conexión e inténtalo de nuevo.", "aviso"));
-    var b = el("button", "Reintentar");
-    b.onclick = elegirMateria;
-    c3.appendChild(b);
-    pantalla(c3);
-  });
-}
-
-function inicio() {
-  var c = el("div", "", "card");
-  c.appendChild(el("h1", "CheckMyKnowledge"));
-  c.appendChild(el("p", "Escribe tu nombre completo:"));
-  var inp = el("input");
-  inp.type = "text";
-  inp.setAttribute("autocomplete", "off");
-  inp.value = nombre;
-  c.appendChild(inp);
-  c.appendChild(el("p", "Al comenzar no podrás salir, minimizar, cambiar de pantalla ni tomar capturas. Si lo haces, el examen se cierra y deberás empezar de nuevo.", "aviso"));
-  var msg = el("p", "", "aviso");
-  c.appendChild(msg);
-  var b = el("button", "Comenzar examen");
-  b.onclick = function () {
-    if (inp.value.trim().length < 3) { msg.textContent = "Escribe tu nombre."; return; }
-    nombre = inp.value.trim();
-    inp.blur();
-    b.disabled = true;
-    b.textContent = "Cargando preguntas...";
-    msg.textContent = "";
-    cargarPreguntas(materiaId).then(function (preguntas) {
-      if (!preguntas.length) throw new Error("No hay preguntas activas");
-      PREGUNTAS = preguntas;
-      setTimeout(function () {
-        if (window.Android) Android.iniciarExamen();
-        idx = 0; resp = [];
-        pregunta();
-      }, 300);
-    }).catch(function () {
-      msg.textContent = "No se pudieron cargar las preguntas. Revisa tu conexión e inténtalo de nuevo.";
-      b.disabled = false;
-      b.textContent = "Comenzar examen";
-    });
-  };
-  c.appendChild(b);
-  pantalla(c);
-}
-
-// Arma el bloque de "contexto" que va arriba de la pregunta (si la pregunta
-// trae uno): video de YouTube embebido si se detecta un link, o un bloque de
-// texto plano si no (instrucciones, pasaje de lectura, etc.). Se reconstruye
-// en cada pregunta, así que si varias preguntas seguidas comparten el mismo
-// contexto (por ejemplo, todo un pasaje de lectura), se repite en cada una
-// — así lo pidió el profesor, para que el alumno no tenga que ir y venir.
-function bloqueContexto(p) {
-  if (!p.x) return null;
-  var idVideo = extraerIdYoutube(p.x);
-  if (idVideo) {
-    var envoltorio = el("div", "", "video-envoltorio");
-    var iframe = document.createElement("iframe");
-    iframe.src = "https://www.youtube.com/embed/" + idVideo;
-    iframe.setAttribute("frameborder", "0");
-    iframe.setAttribute("allow", "accelerometer; encrypted-media; gyroscope; picture-in-picture");
-    iframe.setAttribute("allowfullscreen", "");
-    envoltorio.appendChild(iframe);
-    return envoltorio;
-  }
-  return el("div", p.x, "contexto-texto");
-}
-
-function pregunta() {
-  var p = PREGUNTAS[idx];
-  var c = el("div", "", "card");
-  c.appendChild(el("p", "Pregunta " + (idx + 1) + " de " + PREGUNTAS.length));
-  var contexto = bloqueContexto(p);
-  if (contexto) c.appendChild(contexto);
-  c.appendChild(el("h1", p.t));
-  var sig = el("button", idx + 1 < PREGUNTAS.length ? "Siguiente" : "Terminar");
-  sig.disabled = resp[idx] === undefined;
-  p.o.forEach(function (txt, i) {
-    var b = el("button", String.fromCharCode(65 + i) + ") " + txt, "op" + (resp[idx] === i ? " sel" : ""));
-    b.onclick = function () {
-      resp[idx] = i;
-      var todos = c.querySelectorAll(".op");
-      for (var k = 0; k < todos.length; k++) todos[k].className = "op" + (k === i ? " sel" : "");
-      sig.disabled = false;
+        @Override
+        public void onAccuracyChanged(Sensor sensor, int accuracy) { }
     };
-    c.appendChild(b);
-  });
-  sig.onclick = function () {
-    if (idx + 1 < PREGUNTAS.length) { idx++; pregunta(); } else { fin(); }
-  };
-  c.appendChild(sig);
-  pantalla(c);
-}
 
-function fin() {
-  if (window.Android) Android.terminarExamen();
-  var c = el("div", "", "card");
-  c.appendChild(el("h1", "Calificando..."));
-  c.appendChild(el("p", "Espera un momento."));
-  pantalla(c);
-  intentarCalificar();
-}
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
 
-function intentarCalificar() {
-  calificarExamen(materiaId, nombre, resp).then(function (resultado) {
-    var c = el("div", "", "card");
-    c.appendChild(el("h1", "Examen terminado"));
-    c.appendChild(el("p", nombre + ": " + resultado.correctas + " de " + resultado.total + " correctas"));
-    var b = el("button", "Salir");
-    b.onclick = function () { if (window.Android) Android.salir(); else elegirMateria(); };
-    c.appendChild(b);
-    pantalla(c);
-  }).catch(function () {
-    var c = el("div", "", "card");
-    c.appendChild(el("h1", "No se pudo calificar"));
-    c.appendChild(el("p", "Revisa tu conexión e inténtalo de nuevo. Tus respuestas no se han perdido.", "aviso"));
-    var b = el("button", "Reintentar");
-    b.onclick = intentarCalificar;
-    c.appendChild(b);
-    pantalla(c);
-  });
-}
+        // Bloquea capturas y grabación de pantalla
+        getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE,
+                WindowManager.LayoutParams.FLAG_SECURE);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
-elegirMateria();
-</script>
-</body>
-</html>
+        sensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
+        sensorProximidad = sensorManager.getDefaultSensor(Sensor.TYPE_PROXIMITY);
+        // Si el equipo no trae sensor de proximidad, sensorProximidad queda null
+        // y simplemente no se activa esta defensa en ese equipo (no truena nada).
+
+        webView = new WebView(this);
+        setContentView(webView);
+
+        WebSettings ajustes = webView.getSettings();
+        ajustes.setJavaScriptEnabled(true);
+        ajustes.setAllowFileAccess(false);
+        ajustes.setAllowContentAccess(false);
+
+        webView.setLongClickable(false);
+        webView.setOnLongClickListener(v -> true);
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                return true; // no navegar a ningún otro sitio
+            }
+        });
+        webView.addJavascriptInterface(new Puente(), "Android");
+        webView.loadUrl("file:///android_asset/index.html");
+    }
+
+    public class Puente {
+        @JavascriptInterface
+        public void iniciarExamen() { examenActivo = true; cercaDesdeMs = 0L; }
+
+        @JavascriptInterface
+        public void terminarExamen() { examenActivo = false; cercaDesdeMs = 0L; }
+
+        @JavascriptInterface
+        public void salir() { runOnUiThread(() -> finishAndRemoveTask()); }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (sensorProximidad != null) {
+            sensorManager.registerListener(escuchaProximidad, sensorProximidad, SensorManager.SENSOR_DELAY_UI);
+        }
+    }
+
+    // Si pierde el foco (notificaciones, ventana flotante, etc.) durante el examen
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (!hasFocus && examenActivo) anularExamen();
+    }
+
+    // Si va a Inicio, Recientes o cambia de app durante el examen
+    @Override
+    protected void onPause() {
+        super.onPause();
+        sensorManager.unregisterListener(escuchaProximidad);
+        if (examenActivo) anularExamen();
+    }
+
+    // El botón Atrás no hace nada durante el examen
+    @Override
+    public void onBackPressed() {
+        if (!examenActivo) super.onBackPressed();
+    }
+
+    private void anularExamen() {
+        examenActivo = false;
+        finishAndRemoveTask(); // cierra la app; al abrirla empieza de cero
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (webView != null) webView.destroy();
+        super.onDestroy();
+    }
+}

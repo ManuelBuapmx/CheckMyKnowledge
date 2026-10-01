@@ -14,6 +14,7 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.Toast;
 
 /**
  * Única Activity de la app. Es un "cascarón" nativo que:
@@ -35,6 +36,12 @@ import android.webkit.WebViewClient;
  * principal. Por eso tocan estado del temporizador vía runOnUiThread().
  * El listener del sensor sí corre en el hilo principal (no se le pasa Handler
  * propio al registrarlo).
+ *
+ * CAMBIOS (1/oct/2026): se agregó el modo de depuración del sensor
+ * (DEPURAR_SENSOR) y se cambió el umbral de "cerca" a min(rangoMax, 5 cm).
+ * Motivo: en una prueba real, al poner otro celular encima no pasó nada y
+ * no había forma de saber si faltaba el sensor, si no llegaban eventos o si
+ * fallaba el puente JS.
  */
 public class MainActivity extends Activity {
 
@@ -47,6 +54,28 @@ public class MainActivity extends Activity {
     private volatile boolean examenActivo = false;
 
     // ------------------------------------------------------------------
+    // MODO DEPURACIÓN DEL SENSOR
+    // ------------------------------------------------------------------
+    // Con true, la app muestra avisos (Toast) con el sensor detectado y cada
+    // lectura que llega, para diagnosticar por qué "no pasa nada" en un
+    // equipo concreto. Un Toast no roba el foco de la ventana, así que NO
+    // dispara onWindowFocusChanged ni anula el examen por sí mismo.
+    // IMPORTANTE: ponerlo en false antes de repartir el APK a los alumnos
+    // (los avisos les revelarían cómo funciona la defensa).
+    private static final boolean DEPURAR_SENSOR = true;
+
+    /** Toast reutilizable: se cancela el anterior para que no se acumulen en cola. */
+    private Toast toastDepuracion;
+
+    /** Muestra un aviso solo si DEPURAR_SENSOR está activo. Llamar desde el hilo principal. */
+    private void depurar(String mensaje) {
+        if (!DEPURAR_SENSOR) return;
+        if (toastDepuracion != null) toastDepuracion.cancel();
+        toastDepuracion = Toast.makeText(this, mensaje, Toast.LENGTH_SHORT);
+        toastDepuracion.show();
+    }
+
+    // ------------------------------------------------------------------
     // Detección de "celular pegado a la pantalla" (sensor de proximidad)
     // ------------------------------------------------------------------
     // Por qué sensor y no cámara + IA: la cámara es más pesada, da falsos
@@ -57,7 +86,8 @@ public class MainActivity extends Activity {
     // taparon el sensor.
     //
     // Si el equipo no tiene sensor, sensorProximidad queda null y esta
-    // defensa simplemente no se activa en ese equipo (no truena nada).
+    // defensa simplemente no se activa en ese equipo (no truena nada). En
+    // modo depuración se avisa con un Toast para que no pase desapercibido.
     //
     // POR QUÉ UN TEMPORIZADOR (Handler) Y NO COMPARAR TIMESTAMPS:
     // muchos sensores de proximidad solo emiten un evento cuando CAMBIA el
@@ -71,6 +101,15 @@ public class MainActivity extends Activity {
 
     /** Cuánto tiempo seguido debe estar "cerca" para anular el examen. */
     private static final long UMBRAL_CERCA_MS = 800;
+
+    /**
+     * Distancia máxima (cm) que se considera "cerca". Es el mismo tope que usa
+     * Android internamente para apagar la pantalla en llamadas: sirve para
+     * sensores que reportan distancias continuas con un rango máximo grande
+     * (p. ej. 10 o 100 cm), donde "< rangoMáximo" daría falsos positivos.
+     * En sensores binarios (0 = cerca, máximo = lejos) no cambia nada.
+     */
+    private static final float DISTANCIA_CERCA_CM = 5.0f;
 
     /** Handler atado al hilo principal; ahí corre el callback del temporizador. */
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -92,6 +131,7 @@ public class MainActivity extends Activity {
      */
     private final Runnable anularPorProximidad = () -> {
         temporizadorArmado = false;
+        depurar("Proximidad: tapado " + UMBRAL_CERCA_MS + " ms, examenActivo=" + examenActivo);
         if (examenActivo) anularExamen();
     };
 
@@ -112,12 +152,16 @@ public class MainActivity extends Activity {
         @Override
         public void onSensorChanged(SensorEvent event) {
             if (sensorProximidad == null) return;
-            // "Cerca" = lectura menor al rango máximo del sensor. Muchos equipos
-            // solo reportan dos valores (0 = cerca, máximo = lejos); esta
-            // comparación funciona para ambos tipos de sensor.
-            boolean cerca = event.values.length > 0
-                    && event.values[0] < sensorProximidad.getMaximumRange();
+            // "Cerca" = lectura menor al menor entre el rango máximo del sensor
+            // y DISTANCIA_CERCA_CM. Muchos equipos solo reportan dos valores
+            // (0 = cerca, máximo = lejos); esta comparación funciona para ambos
+            // tipos de sensor (binario y continuo).
+            float umbral = Math.min(sensorProximidad.getMaximumRange(), DISTANCIA_CERCA_CM);
+            boolean cerca = event.values.length > 0 && event.values[0] < umbral;
             ultimaLecturaCerca = cerca;
+
+            depurar("Proximidad: valor=" + (event.values.length > 0 ? event.values[0] : -1)
+                    + " umbral=" + umbral + " cerca=" + cerca + " examenActivo=" + examenActivo);
 
             if (!examenActivo) { cancelarTemporizador(); return; }
             if (cerca) armarTemporizador(); else cancelarTemporizador();
@@ -186,6 +230,7 @@ public class MainActivity extends Activity {
         public void iniciarExamen() {
             runOnUiThread(() -> {
                 examenActivo = true;
+                depurar("Examen iniciado (vigilancia activa)");
                 // Si el sensor ya estaba tapado, no llegará un evento nuevo: armamos aquí.
                 if (ultimaLecturaCerca) armarTemporizador();
             });
@@ -210,7 +255,15 @@ public class MainActivity extends Activity {
         super.onResume();
         if (sensorProximidad != null) {
             // SENSOR_DELAY_UI basta: solo nos importa el cambio cerca/lejos.
-            sensorManager.registerListener(escuchaProximidad, sensorProximidad, SensorManager.SENSOR_DELAY_UI);
+            boolean registrado = sensorManager.registerListener(
+                    escuchaProximidad, sensorProximidad, SensorManager.SENSOR_DELAY_UI);
+            // Diagnóstico: nombre del sensor, rango máximo y si el registro tuvo éxito.
+            depurar("Sensor: " + sensorProximidad.getName()
+                    + " | rangoMax=" + sensorProximidad.getMaximumRange()
+                    + " | registrado=" + registrado);
+        } else {
+            // Sin sensor, la defensa no existe en este equipo: se avisa en depuración.
+            depurar("SIN SENSOR DE PROXIMIDAD en este equipo");
         }
     }
 

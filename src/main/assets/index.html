@@ -39,6 +39,9 @@
     padding: 10px 12px; margin-bottom: 12px; font-size: 14px; line-height: 1.4;
     white-space: pre-wrap; -webkit-user-select: text; user-select: text;
   }
+  /* Mensaje que aparece bajo el video cuando el reproductor de YouTube falla
+     (ver crearReproductor()). */
+  .video-aviso { font-size: 13px; color: #b71c1c; margin: -6px 0 12px; }
 </style>
 </head>
 <body>
@@ -100,13 +103,73 @@ function calificarExamen(materiaId, nombreAlumno, respuestas) {
 }
 
 // Busca un link de YouTube (youtube.com/watch?v=, youtu.be/, o ya en formato
-// /embed/) dentro de un texto libre y regresa solo el ID del video, o null si
-// no encuentra ninguno. Se usa para decidir si el "contexto" de una pregunta
+// /embed/) dentro de un texto libre y regresa solo el ID del video, o null si no
+// encuentra ninguno. Se usa para decidir si el "contexto" de una pregunta
 // se muestra como video embebido o como bloque de texto plano.
 function extraerIdYoutube(texto) {
   if (!texto) return null;
   var m = /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([A-Za-z0-9_-]{6,})/.exec(texto);
   return m ? m[1] : null;
+}
+
+// ---- Reproductor de YouTube (API oficial de iframe) ----
+// CAMBIO (2/oct/2026): antes el video era un <iframe src=".../embed/ID"> a pelo. Eso
+// daba "error de configuración del reproductor" (153) o "video no disponible" sin
+// decir por qué. Con la API oficial (YT.Player) la página se identifica ante YouTube
+// con su origen (parámetro "origin"), que es lo que el reproductor exige, y además
+// la API avisa el CÓDIGO del error (onError), que ahora se muestra bajo el video
+// para saber la causa real en vez de adivinar.
+//
+// La API es https://www.youtube.com/iframe_api; al cargar llama a la función global
+// onYouTubeIframeAPIReady. Mientras no esté lista, las peticiones de video se
+// guardan en ytCola y se ejecutan cuando llegue.
+var ytListo = false;
+var ytCola = [];
+var ytContador = 0; // para dar un id único a cada contenedor de reproductor
+
+window.onYouTubeIframeAPIReady = function () {
+  ytListo = true;
+  ytCola.forEach(function (f) { f(); });
+  ytCola = [];
+};
+
+function cargarApiYoutube() {
+  if (document.getElementById("yt-api")) return; // ya se pidió
+  var s = document.createElement("script");
+  s.id = "yt-api";
+  s.src = "https://www.youtube.com/iframe_api";
+  document.head.appendChild(s);
+}
+
+// Texto para el alumno/profesor según el código de error de YouTube.
+function mensajeErrorVideo(codigo) {
+  if (codigo === 101 || codigo === 150) return "El dueño del video no permite verlo dentro de otras apps (código " + codigo + "). Avisa a tu profesor.";
+  if (codigo === 100) return "El video no existe o es privado (código 100). Avisa a tu profesor.";
+  if (codigo === 153) return "YouTube rechazó la configuración del reproductor (código 153). Avisa a tu profesor.";
+  if (codigo === 2) return "El enlace del video no es válido (código 2). Avisa a tu profesor.";
+  return "No se pudo reproducir el video (código " + codigo + "). Avisa a tu profesor.";
+}
+
+// Crea el reproductor dentro de "destino" (un <div> ya presente en la pantalla).
+// "aviso" es el elemento donde se escribe el mensaje si algo falla.
+function crearReproductor(destino, idVideo, aviso) {
+  function iniciar() {
+    var vars = { playsinline: 1, rel: 0 };
+    // origin = origen de esta página (https://<id de la app>, ver MainActivity.origenBase()).
+    // Si el WebView reportara "null" no se manda, para no dar un origen inválido.
+    if (window.location.origin && window.location.origin !== "null") vars.origin = window.location.origin;
+    new YT.Player(destino, {
+      videoId: idVideo, width: "100%", height: "100%", playerVars: vars,
+      events: { onError: function (e) { aviso.textContent = mensajeErrorVideo(e.data); } }
+    });
+  }
+  if (ytListo) { iniciar(); return; }
+  ytCola.push(iniciar);
+  cargarApiYoutube();
+  // Si en 8 s la API no llegó (sin internet, bloqueada), se avisa en vez de dejar el cuadro negro.
+  setTimeout(function () {
+    if (!ytListo) aviso.textContent = "No se pudo cargar el reproductor de YouTube. Revisa tu conexión.";
+  }, 8000);
 }
 
 // ---- Estado y pantallas ----
@@ -197,25 +260,31 @@ function inicio() {
 }
 
 // Arma el bloque de "contexto" que va arriba de la pregunta (si la pregunta
-// trae uno): video de YouTube embebido si se detecta un link, o un bloque de
+// trae uno): video de YouTube si se detecta un link, o un bloque de
 // texto plano si no (instrucciones, pasaje de lectura, etc.). Se reconstruye
 // en cada pregunta, así que si varias preguntas seguidas comparten el mismo
 // contexto (por ejemplo, todo un pasaje de lectura), se repite en cada una
 // — así lo pidió el profesor, para que el alumno no tenga que ir y venir.
+//
+// Regresa { nodo, iniciar }: "nodo" es lo que se agrega a la pantalla; "iniciar"
+// (solo en videos) se llama DESPUÉS de que el nodo ya está en el documento, porque
+// la API de YouTube necesita encontrar el contenedor en pantalla para reemplazarlo
+// por el reproductor.
 function bloqueContexto(p) {
   if (!p.x) return null;
   var idVideo = extraerIdYoutube(p.x);
   if (idVideo) {
+    var caja = el("div");
     var envoltorio = el("div", "", "video-envoltorio");
-    var iframe = document.createElement("iframe");
-    iframe.src = "https://www.youtube.com/embed/" + idVideo;
-    iframe.setAttribute("frameborder", "0");
-    iframe.setAttribute("allow", "accelerometer; encrypted-media; gyroscope; picture-in-picture");
-    iframe.setAttribute("allowfullscreen", "");
-    envoltorio.appendChild(iframe);
-    return envoltorio;
+    var destino = el("div");
+    destino.id = "yt-destino-" + (++ytContador);
+    envoltorio.appendChild(destino);
+    var aviso = el("p", "", "video-aviso");
+    caja.appendChild(envoltorio);
+    caja.appendChild(aviso);
+    return { nodo: caja, iniciar: function () { crearReproductor(destino.id, idVideo, aviso); } };
   }
-  return el("div", p.x, "contexto-texto");
+  return { nodo: el("div", p.x, "contexto-texto"), iniciar: null };
 }
 
 function pregunta() {
@@ -227,7 +296,7 @@ function pregunta() {
   // recordatorio constante de en qué parte del examen va el alumno.
   if (p.s) c.appendChild(el("p", p.s, "seccion-label"));
   var contexto = bloqueContexto(p);
-  if (contexto) c.appendChild(contexto);
+  if (contexto) c.appendChild(contexto.nodo);
   c.appendChild(el("h1", p.t));
   var sig = el("button", idx + 1 < PREGUNTAS.length ? "Siguiente" : "Terminar");
   sig.disabled = resp[idx] === undefined;
@@ -246,6 +315,8 @@ function pregunta() {
   };
   c.appendChild(sig);
   pantalla(c);
+  // El reproductor se crea hasta que la tarjeta ya está en pantalla (ver bloqueContexto).
+  if (contexto && contexto.iniciar) contexto.iniciar();
 }
 
 function fin() {

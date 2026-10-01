@@ -1,7 +1,7 @@
 # CheckMyKnowledge
 
 App Android de exámenes de opción múltiple para alumnos, con reglas anti-trampa.
-El profesor administra preguntas y ve resultados desde un panel web (`admin.html`).
+El profesor administra materias, secciones y preguntas, y ve resultados desde un panel web (`admin.html`).
 
 ## Cómo está armado
 
@@ -9,7 +9,7 @@ El profesor administra preguntas y ve resultados desde un panel web (`admin.html
 |---|---|
 | `src/main/java/.../MainActivity.java` | Cascarón nativo: abre un WebView con la app y hace cumplir las reglas anti-trampa. |
 | `src/main/assets/index.html` | La app del alumno (HTML + JS puro, sin librerías). Habla con Supabase. |
-| `admin.html` | Panel del profesor (login, CRUD de preguntas, importar examen por script, resultados). Se abre en un navegador; no va dentro del APK. |
+| `admin.html` | Panel del profesor (login, preguntas, secciones, materias, importar examen por script, resultados). Se abre en un navegador; no va dentro del APK. |
 | `src/main/AndroidManifest.xml` | Permisos y bloqueo de orientación / multiventana. |
 | `build.gradle.kts`, `settings.gradle.kts` | Compilación Gradle. |
 | `.github/workflows/build.yml` | Compila el APK en GitHub Actions. |
@@ -29,48 +29,82 @@ sin orientación horizontal ni multiventana, sin navegación a otros sitios.
 
 ### Sensor de proximidad: detalles y límites
 
-- Se considera "cerca" una lectura menor a `min(rangoMáximoDelSensor, 5 cm)` (`DISTANCIA_CERCA_CM`), el mismo criterio que usa Android para apagar la pantalla en llamadas.
-- Solo detecta algo pegado al **borde superior** de la pantalla (donde está el sensor, junto a la bocina). Un segundo celular puesto al lado o más abajo **no** se detecta: es una defensa parcial, no una garantía.
-- Si el equipo no tiene sensor, la defensa simplemente no se activa en ese equipo.
+- Se considera "cerca" una lectura menor a `min(rangoMáximoDelSensor, 5 cm)` (`DISTANCIA_CERCA_CM`).
+- Solo detecta algo pegado al **borde superior** de la pantalla (donde está el sensor). Un segundo celular al lado o más abajo **no** se detecta: es una defensa parcial.
+- Si el equipo no tiene sensor, la defensa no se activa en ese equipo.
+- **Estado (2/oct/2026): en pruebas reales sigue sin anular el examen; investigación en pausa.** Para diagnosticar existe `DEPURAR_SENSOR`.
 
 ### Modo depuración del sensor (`DEPURAR_SENSOR`)
 
-Agregado el 1/oct/2026 porque en una prueba real al poner otro celular encima no pasó nada y no había forma de saber la causa.
+Con `DEPURAR_SENSOR = true` en `MainActivity.java` la app muestra avisos (Toast) con el sensor detectado, su rango y cada lectura (`valor`, `umbral`, `cerca`, `examenActivo`). Los Toast no roban el foco, así que no anulan el examen.
 
-Con `DEPURAR_SENSOR = true` en `MainActivity.java`, la app muestra avisos (Toast) con:
-
-- el sensor detectado, su rango máximo y si se registró bien (o `SIN SENSOR DE PROXIMIDAD`),
-- cada lectura (`valor`, `umbral`, `cerca`, `examenActivo`).
-
-Cómo interpretarlo con el examen empezado y tapando el sensor:
-
-| Qué ves | Causa |
+| Qué ves al tapar el sensor con el examen empezado | Causa |
 |---|---|
-| No aparece ninguna lectura | El sensor no entrega eventos o no se está tapando el sensor correcto |
+| Ninguna lectura | El sensor no entrega eventos o no se tapa el sensor correcto |
 | `cerca=true examenActivo=false` | Falla el puente JS (`iniciarExamen` no llega) |
 | `cerca=true examenActivo=true` y no se cierra | Bug en el temporizador |
 
-Los Toast no roban el foco, así que no anulan el examen por sí mismos.
-
 **⚠ Antes de repartir el APK a los alumnos, poner `DEPURAR_SENSOR = false`.**
+
+## Panel del profesor (`admin.html`)
+
+Pestañas: **Preguntas · Secciones · Materias · Importar · Resultados**.
+
+### Preguntas
+- Filtros por materia y por sección (incluye "(Sin sección)").
+- Casilla por pregunta y "seleccionar todas las visibles". Con las marcadas: **Asignar sección**, **Quitar sección** (no borra preguntas) y **Borrar seleccionadas**.
+- **Borrar todas las visibles**: borra lo que muestre el filtro actual (sin filtros = todo). Pide escribir `BORRAR`.
+- Cada pregunta muestra etiquetas de sección y de contexto (▶ Video / 📄 Texto de apoyo).
+
+### Secciones
+Las secciones **no son una tabla**: son un texto libre en `preguntas.seccion` (así lo usa `index.html`). Por eso:
+- *Agregar* = poner ese texto a un grupo de preguntas, por rango de `#` de orden ("de la 11 a la 20 es Listening") o con las casillas de Preguntas.
+- *Renombrar* cambia el texto en todas sus preguntas. *Quitar sección* vacía el texto (las preguntas se conservan). *Borrar preguntas* elimina la sección con sus preguntas.
+
+### Materias
+Crear, editar (nombre/orden), **Activar/Desactivar** (oculta a los alumnos sin borrar nada) y **Borrar**. Borrar una materia elimina sus preguntas y, con confirmación aparte, sus resultados. Si solo quieres ocultarla, desactívala.
+
+### Importar por script (Apps Script de Forms)
+Además de `FormApp.create`, `addMultipleChoiceItem`, `setTitle`, `createChoice`, `setChoices`:
+
+| Llamada | Efecto |
+|---|---|
+| `FormApp.create('Título')` | El título es la **sección** de sus preguntas |
+| `exam.addSectionHeaderItem().setTitle('Listening')` | Cambia la **sección** de las preguntas siguientes y reinicia el contexto |
+| `...setHelpText('texto')` (en el encabezado) | Ese texto es el **contexto** de las preguntas siguientes (p. ej. pasaje de lectura) |
+| `exam.addVideoItem().setVideoUrl('link YouTube')` | Las preguntas siguientes llevan ese **video** (se repite en cada una) hasta otro video o encabezado |
+| `item.setContext('link o texto')` / `item.setVideoUrl(...)` | Contexto solo para esa pregunta |
+| `exam.addPageBreakItem().setTitle('SECTION 1')` | Inicia una **sección** (título de la página); un encabezado posterior se agrega: `SECTION 1 · Part A` |
+| Link de YouTube dentro de un `setHelpText('... Click to play: URL')` | Se detecta y se guarda solo el video (la app muestra solo el video si hay link) |
+
+Las funciones auxiliares con parámetros (p. ej. `addQuestion(exam, ...)`) no se ejecutan solas: solo las funciones sin parámetros; `Logger.log` y `exam.getEditUrl()` se aceptan y se ignoran. Los links de YouTube (watch, youtu.be, embed, shorts, live) se guardan siempre como `https://www.youtube.com/watch?v=ID`, que es el formato que reconoce `index.html`. Un link que **no** sea de YouTube se marca como error (los links externos rompen el examen).
+
+### Videos de YouTube dentro de la app
+Una página `file://` no tiene origen válido y YouTube responde "error de configuración del reproductor". Por eso `MainActivity` carga `index.html` con `loadDataWithBaseURL(ORIGEN_BASE, ...)` (origen `https`) y activa DOM storage. Si el error persiste, cambiar solo la constante `ORIGEN_BASE`. Un video con embebido deshabilitado por su dueño tampoco carga: probar con otro.
+
+### Permisos (RLS)
+El panel cuenta las filas afectadas por cada operación; si la base no deja modificar, avisa en lugar de fingir éxito. Para crear/editar/borrar **materias** hace falta una política RLS que permita al admin escribir en `materias` (igual que la que ya existe para `preguntas`).
 
 ## Reglas para quien modifique el código (persona o IA)
 
-1. **Comenta el código.** Todo cambio debe explicar el *porqué*, no solo el qué. Los comentarios son obligatorios; este repo prioriza comentarios claros para que cualquiera pueda retomarlo.
+1. **Comenta el código.** Los comentarios son obligatorios: explican el *porqué*, no solo el qué, para que cualquiera pueda retomarlo.
 2. **Entrega archivos completos y listos para descargar**, no fragmentos.
-3. **Actualiza este README** en cada cambio relevante, para mantener informado el estado del proyecto.
-4. **Nunca se envía la respuesta correcta al cliente.** `index.html` solo pide `texto, opciones, contexto, seccion`; la calificación la hace la función `calificar_examen` en Supabase. No agregar `correcta` al `select` del cliente.
+3. **Actualiza este README** en cada cambio relevante.
+4. **Nunca se envía la respuesta correcta al cliente.** `index.html` solo pide `texto, opciones, contexto, seccion`; la calificación la hace `calificar_examen` en Supabase. No agregar `correcta` al `select` del cliente.
 5. **Cualquier regla anti-trampa nueva debe terminar en `anularExamen()`** de `MainActivity.java`.
-6. **Los links externos romperían el examen**: abrir otra app (p. ej. YouTube) hace que la app pierda el foco y se anule. Por eso los videos van *embebidos* (iframe), nunca como link.
-7. **El puente JS↔Java** (`Puente`, expuesto como `window.Android`) tiene tres métodos: `iniciarExamen`, `terminarExamen`, `salir`. Si cambias nombres, cámbialos en `index.html` también.
-8. **No volver a agregar pasos al workflow que hagan commit/push** al repo (causaron un run fallido; ver nota en `build.yml`).
-9. La clave `anon` de Supabase en `index.html` y `admin.html` es pública por diseño; la seguridad real está en las políticas RLS de la base de datos.
+6. **Los links externos romperían el examen**: abrir otra app (p. ej. YouTube) hace que la app pierda el foco y se anule. Los videos van *embebidos* (iframe), nunca como link.
+7. **El puente JS↔Java** (`Puente`, `window.Android`) tiene tres métodos: `iniciarExamen`, `terminarExamen`, `salir`. Si cambias nombres, cámbialos en `index.html` también.
+8. **No volver a agregar pasos al workflow que hagan commit/push** al repo (ver nota en `build.yml`).
+9. La clave `anon` de Supabase en `index.html` y `admin.html` es pública por diseño; la seguridad real está en las políticas RLS.
 10. **`DEPURAR_SENSOR` debe estar en `false`** en cualquier APK que se reparta a alumnos.
 
 ## Compilar
 
-Push a `main` (o "Run workflow" en la pestaña Actions). El APK queda como artifact `checkmyknowledge-apk`.
+Push a `main` (o "Run workflow" en la pestaña Actions). El APK queda como artifact `checkmyknowledge-apk`. `admin.html` no se compila: se sube/abre aparte.
 
 ## Historial de cambios
 
-- **1/oct/2026** — Modo depuración del sensor de proximidad (`DEPURAR_SENSOR`), umbral de "cerca" alineado a `min(rangoMax, 5 cm)`, y reglas nuevas 1–3 y 10 en este README.
+- **2/oct/2026 (3)** — `MainActivity`: `index.html` se carga con origen https (`ORIGEN_BASE`) y DOM storage activo, para corregir el error de configuración del reproductor de YouTube.
+- **2/oct/2026 (2)** — Importador: corregido `Logger is not defined`; solo ejecuta funciones sin parámetros (antes truena con `addQuestion(...)`); soporta `addPageBreakItem` como sección y links de YouTube dentro de `setHelpText`.
+- **2/oct/2026** — `admin.html`: pestañas Materias y Secciones, selección y borrado masivo de preguntas, asignar/quitar secciones, soporte de video de YouTube y encabezados de sección en el script de importación, detección de operaciones bloqueadas por RLS.
+- **1/oct/2026** — Modo depuración del sensor (`DEPURAR_SENSOR`), umbral de "cerca" a `min(rangoMax, 5 cm)`, reglas 1–3 y 10 del README.

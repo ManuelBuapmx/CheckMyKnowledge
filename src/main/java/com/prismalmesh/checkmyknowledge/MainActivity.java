@@ -43,9 +43,12 @@ import java.io.InputStream;
  *
  * CAMBIOS (1/oct/2026): se agregó el modo de depuración del sensor
  * (DEPURAR_SENSOR) y se cambió el umbral de "cerca" a min(rangoMax, 5 cm).
- * Motivo: en una prueba real, al poner otro celular encima no pasó nada y
- * no había forma de saber si faltaba el sensor, si no llegaban eventos o si
- * fallaba el puente JS.
+ *
+ * CAMBIOS (2/oct/2026): index.html se carga con origen https (loadDataWithBaseURL).
+ * CAMBIO (2/oct/2026, 2): el origen ya NO es "https://www.youtube.com" (la página
+ * se hacía pasar por YouTube y el reproductor respondía error 152-4). Ahora es
+ * "https://" + el package de la app, que es como YouTube pide que se identifique
+ * una app que embebe sus videos. Ver origenBase().
  */
 public class MainActivity extends Activity {
 
@@ -54,15 +57,20 @@ public class MainActivity extends Activity {
     // ------------------------------------------------------------------
     // ORIGEN "https" PARA LA PÁGINA (necesario para los videos de YouTube)
     // ------------------------------------------------------------------
-    // Antes la página se cargaba con loadUrl("file:///android_asset/index.html").
     // Una página file:// no tiene origen ni Referer válidos, y YouTube rechaza
-    // reproducir videos embebidos así: muestra "error de configuración del
-    // reproductor" (error 153). Solución: leer index.html de assets y cargarlo con
-    // loadDataWithBaseURL, que le da a la página un origen https, y el iframe de
-    // YouTube envía entonces un Referer válido.
-    // Si algún día YouTube vuelve a rechazarlo, prueba cambiando este valor (p. ej.
-    // a "https://localhost/"); es lo único que hay que tocar.
-    private static final String ORIGEN_BASE = "https://www.youtube.com";
+    // reproducir videos embebidos así (error de configuración 153). Por eso
+    // index.html se lee de assets y se carga con loadDataWithBaseURL, que le da
+    // a la página un origen https; el iframe de YouTube envía entonces un
+    // Referer válido.
+    //
+    // El origen debe identificar A NUESTRA APP, no a YouTube: con
+    // "https://www.youtube.com" el reproductor respondía error 152-4. El formato
+    // recomendado por YouTube para apps es "https://<applicationId>".
+    // Si algún día vuelve a fallar, esta función es lo único que hay que tocar
+    // (p. ej. devolver "https://localhost/").
+    private String origenBase() {
+        return "https://" + getPackageName();
+    }
 
     /** Lee un archivo de assets/ completo como texto UTF-8. */
     private String leerAsset(String nombre) throws IOException {
@@ -228,7 +236,7 @@ public class MainActivity extends Activity {
         // negarse a iniciar. No da acceso a archivos ni a otras páginas.
         ajustes.setDomStorageEnabled(true);
         // ...file:///android_asset/ NO depende de setAllowFileAccess, por eso
-        // loadUrl() de abajo sigue funcionando.
+        // el loadUrl() de respaldo de abajo sigue funcionando.
 
         // Sin menú de copiar/pegar por pulsación larga.
         webView.setLongClickable(false);
@@ -246,10 +254,11 @@ public class MainActivity extends Activity {
 
         // Expone la clase Puente al JS como window.Android.
         webView.addJavascriptInterface(new Puente(), "Android");
-        // Se carga con origen https (ver ORIGEN_BASE). Si por algo no se pudo leer el
-        // asset, se cae al método anterior para que la app al menos abra (sin videos).
+        // Se carga con origen https propio (ver origenBase()). Si por algo no se pudo
+        // leer el asset, se cae al método anterior para que la app al menos abra
+        // (sin videos).
         try {
-            webView.loadDataWithBaseURL(ORIGEN_BASE, leerAsset("index.html"), "text/html", "UTF-8", null);
+            webView.loadDataWithBaseURL(origenBase(), leerAsset("index.html"), "text/html", "UTF-8", null);
         } catch (IOException e) {
             webView.loadUrl("file:///android_asset/index.html");
         }

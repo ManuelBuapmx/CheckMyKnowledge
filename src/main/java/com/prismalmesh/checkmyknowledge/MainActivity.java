@@ -16,6 +16,10 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+
 /**
  * Única Activity de la app. Es un "cascarón" nativo que:
  *   1. Muestra en un WebView la app real del alumno (assets/index.html).
@@ -46,6 +50,30 @@ import android.widget.Toast;
 public class MainActivity extends Activity {
 
     private WebView webView;
+
+    // ------------------------------------------------------------------
+    // ORIGEN "https" PARA LA PÁGINA (necesario para los videos de YouTube)
+    // ------------------------------------------------------------------
+    // Antes la página se cargaba con loadUrl("file:///android_asset/index.html").
+    // Una página file:// no tiene origen ni Referer válidos, y YouTube rechaza
+    // reproducir videos embebidos así: muestra "error de configuración del
+    // reproductor" (error 153). Solución: leer index.html de assets y cargarlo con
+    // loadDataWithBaseURL, que le da a la página un origen https, y el iframe de
+    // YouTube envía entonces un Referer válido.
+    // Si algún día YouTube vuelve a rechazarlo, prueba cambiando este valor (p. ej.
+    // a "https://localhost/"); es lo único que hay que tocar.
+    private static final String ORIGEN_BASE = "https://www.youtube.com";
+
+    /** Lee un archivo de assets/ completo como texto UTF-8. */
+    private String leerAsset(String nombre) throws IOException {
+        try (InputStream in = getAssets().open(nombre);
+             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+            return out.toString("UTF-8");
+        }
+    }
 
     /**
      * true solo entre iniciarExamen() y terminarExamen() (o hasta que se anule).
@@ -196,6 +224,9 @@ public class MainActivity extends Activity {
         ajustes.setJavaScriptEnabled(true);   // index.html es JS; necesario
         ajustes.setAllowFileAccess(false);    // cerrado a propósito...
         ajustes.setAllowContentAccess(false);
+        // El reproductor embebido de YouTube usa almacenamiento DOM; sin esto puede
+        // negarse a iniciar. No da acceso a archivos ni a otras páginas.
+        ajustes.setDomStorageEnabled(true);
         // ...file:///android_asset/ NO depende de setAllowFileAccess, por eso
         // loadUrl() de abajo sigue funcionando.
 
@@ -215,7 +246,13 @@ public class MainActivity extends Activity {
 
         // Expone la clase Puente al JS como window.Android.
         webView.addJavascriptInterface(new Puente(), "Android");
-        webView.loadUrl("file:///android_asset/index.html");
+        // Se carga con origen https (ver ORIGEN_BASE). Si por algo no se pudo leer el
+        // asset, se cae al método anterior para que la app al menos abra (sin videos).
+        try {
+            webView.loadDataWithBaseURL(ORIGEN_BASE, leerAsset("index.html"), "text/html", "UTF-8", null);
+        } catch (IOException e) {
+            webView.loadUrl("file:///android_asset/index.html");
+        }
     }
 
     /**

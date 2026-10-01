@@ -1,3 +1,6 @@
+# Compila el APK de depuración en GitHub Actions.
+# Se dispara en cada push a main, o a mano desde la pestaña Actions
+# (workflow_dispatch). El APK queda como "artifact" descargable del run.
 name: Compilar APK
 on:
   push:
@@ -8,6 +11,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # Descarga el código del repo en el runner.
       - uses: actions/checkout@v4
 
       # NOTA (28/sep/2026): antes de este paso había un bloque "Crear
@@ -24,17 +28,25 @@ jobs:
       # comiteados en main, el bloque quedó eliminado: ya no hace falta
       # regenerarlos ni volver a intentar un push en cada build, así que esa
       # condición de carrera no puede volver a pasar.
+      # => NO volver a agregar pasos que escriban/commiteen archivos del repo.
+
+      # Java 17: requerido por el plugin de Android 8.x (ver build.gradle.kts).
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
+      # Instala Gradle 8.9 (el repo no incluye gradlew). Mantener compatible
+      # con la versión del plugin de Android en build.gradle.kts.
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
+      # --no-daemon: en un runner efímero no sirve dejar el daemon vivo.
       - run: gradle assembleDebug --no-daemon
 
+      # Publica el APK para descargarlo desde la página del run.
+      # Si cambias la estructura del proyecto, revisa que esta ruta siga existiendo.
       - uses: actions/upload-artifact@v4
         with:
           name: checkmyknowledge-apk

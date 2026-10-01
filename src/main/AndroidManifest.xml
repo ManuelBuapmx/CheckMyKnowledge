@@ -1,13 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Único permiso: internet, para hablar con Supabase (cargar materias y
+         preguntas, y calificar el examen). No se piden cámara, micrófono,
+         almacenamiento ni ubicación. El sensor de proximidad no requiere permiso. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- allowBackup="false": evita que Android respalde datos de la app en la nube.
+         El tema NoActionBar quita la barra superior; toda la interfaz vive en el
+         WebView (assets/index.html). -->
     <application
         android:label="CheckMyKnowledge"
         android:allowBackup="false"
         android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
 
+        <!-- Única pantalla de la app. Decisiones anti-trampa que viven AQUI:
+             - screenOrientation="portrait": no se puede girar el celular.
+             - resizeableActivity="false": evita modo ventana dividida / multiventana,
+               que dejaría ver otra app junto al examen.
+             - configChanges: si el sistema cambia orientación, tamaño, idioma, etc.,
+               Android NO recrea la Activity (recrearla reiniciaría el WebView y el
+               examen). Se maneja todo sin reiniciar.
+             - exported="true" es obligatorio por tener intent-filter LAUNCHER. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"

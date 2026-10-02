@@ -16,7 +16,7 @@ El profesor administra materias, secciones y preguntas, y ve resultados desde un
 | `build.gradle.kts`, `settings.gradle.kts` | Compilación Gradle. |
 | `.github/workflows/build.yml` | Compila el APK en GitHub Actions. |
 
-Backend: Supabase (tablas `materias`, `preguntas`, `resultados`, `alumnos`, `intentos`; funciones RPC `validar_matricula`, `iniciar_intento` y `calificar_examen`).
+Backend: Supabase (tablas `materias`, `preguntas`, `resultados`, `alumnos`, `intentos`, `config`; funciones RPC `validar_matricula`, `iniciar_intento`, `obtener_preguntas` y `calificar_examen`).
 
 ## Acceso del alumno y intento único (`index.html` + Supabase)
 
@@ -27,7 +27,7 @@ Backend: Supabase (tablas `materias`, `preguntas`, `resultados`, `alumnos`, `int
 - **Tiempo agotado con la app cerrada:** si el alumno vuelve después de que venció el tiempo sin haber entregado, `iniciar_intento` lo cierra y registra un resultado con **0 correctas** (`respuestas = []`), y le responde `agotado`. Si vuelve después de haber entregado, responde `usado`. En ambos casos la app muestra un mensaje y no deja contestar.
 - **Estados de `iniciar_intento`** (siempre `jsonb`, nunca error HTTP para estos casos, porque el cierre con 0 no debe revertirse): `ok` (trae `matricula`, `nombre`, `grupo`, `restante_seg`, `reanudado`), `usado`, `agotado`. La matrícula inexistente sí lanza el error `Matrícula no registrada`; también lanza error si la materia no tiene preguntas activas.
 - **Duración:** la define el servidor en la función `duracion_examen()` (hoy 60 min). `DURACION_MIN` en `index.html` solo se usa para el texto que ve el alumno: **si cambias una, cambia la otra**.
-- **`calificar_examen`** valida la matrícula OTRA VEZ, **exige un intento en curso** (si no existe: `No hay un intento iniciado`; si ya está cerrado: `Intento ya utilizado`), exige estar dentro de tiempo con **120 s de margen** por latencia de red (si no: `Tiempo agotado`), toma nombre y grupo de la tabla, guarda el resultado y cierra el intento en la misma transacción. Ya no acepta un nombre libre.
+- **`calificar_examen`** verifica la firma de la app (ver "Firma de la app"), valida la matrícula OTRA VEZ, **exige un intento en curso** (si no existe: `No hay un intento iniciado`; si ya está cerrado: `Intento ya utilizado`), exige estar dentro de tiempo con **120 s de margen** por latencia de red (si no: `Tiempo agotado`), toma nombre y grupo de la tabla, guarda el resultado y cierra el intento en la misma transacción. Ya no acepta un nombre libre.
 - **Encabezado del examen:** barra fija arriba con el reloj y, debajo, `nombre · matrícula · Grupo`, tal como los devuelve el servidor.
 - **La validación es del lado del servidor.** Tabla `alumnos(matricula PK, nombre, grupo, activo, creado_en)` con RLS: el rol `anon` no puede leerla ni escribirla (privilegios revocados), solo el admin desde el panel. La lista completa nunca viaja a la app. `intentos` tiene el mismo tratamiento: `anon` no la lee ni la escribe; solo las funciones (SECURITY DEFINER) y el admin (leer y borrar).
 - **Resultados:** `resultados` tiene columnas `matricula` y `grupo`; `nombre` guarda solo el nombre.
@@ -39,6 +39,30 @@ Backend: Supabase (tablas `materias`, `preguntas`, `resultados`, `alumnos`, `int
   ```
   Si el alumno solo tiene un intento en curso y no hay resultado, basta con borrar la fila de `intentos`.
 - **Límite conocido:** al ser acceso solo por matrícula, quien conozca la matrícula de un compañero puede entrar como él (y, con el intento único, **gastarle su intento**), y puede probar matrículas (suelen ser predecibles). No hay otro factor. Si hace falta, añadir un PIN por alumno.
+
+## Firma de la app (que el examen solo se presente desde el APK)
+
+**Problema que resuelve:** la clave `anon` es pública y las funciones RPC son ejecutables por `anon`, así que cualquiera con una matrícula podía presentar el examen desde un navegador o un script (con buscador o IA al lado), sin pasar por ninguna regla anti-trampa del APK. Además las preguntas se podían bajar por REST sin matrícula y a cualquier hora.
+
+**Cómo funciona:**
+- Cada llamada del alumno lleva `p_ts` (segundos Unix del celular) y `p_firma` = `HMAC-SHA256(clave, accion|matricula|materia|ts)` en hex minúscula. `accion` es `iniciar`, `preguntas` o `calificar`.
+- La firma la genera **solo el APK** (`Puente.firmar()` en `MainActivity.java`, expuesto a la página como `Android.firmar`). `index.html` la pide en **cada** llamada, también en reintentos.
+- El servidor la comprueba en `_verificar_firma` **antes** de revelar cualquier dato (así tampoco sirve para adivinar matrículas). Acepta un `ts` de ±5 minutos; si el reloj del celular está desajustado responde `Reloj desajustado` y la app pide corregir la hora. Sin firma o con firma errónea responde `Firma requerida` / `Firma inválida`.
+- **Las preguntas ya no se leen por REST.** `index.html` las pide a `obtener_preguntas`, que exige firma válida, alumno activo y un intento en curso y dentro de tiempo, y nunca incluye la respuesta correcta. Usa el mismo orden que `calificar_examen` (`orden, id`), así posición y calificación siempre coinciden.
+- **La clave** (`firma_secreto`) vive en la tabla `config` de Supabase (RLS cerrada, sin acceso para `anon` ni `authenticated`) y en el APK como `BuildConfig.FIRMA_SECRETO`, inyectada al compilar desde el secreto de GitHub `CMK_FIRMA_SECRETO`. **Nunca va en el repo ni en `index.html`.** Si el APK se compila sin ella, `build.yml` aborta.
+- **Interruptor `exigir_firma`** (tabla `config`). Mientras sea `false`, el servidor NO exige firma y las preguntas siguen siendo legibles por REST (así un APK anterior no se cae mientras se reparte el nuevo). **Se activa con:**
+  ```sql
+  update public.config set valor = 'true' where clave = 'exigir_firma';
+  ```
+  Al activarlo, la política de lectura de `preguntas` para `anon` deja de dar acceso automáticamente. Para volver atrás, `'false'`.
+- **Rotar la clave** (hacerlo si se sospecha que se filtró, o entre exámenes si quieres): generar otra en Supabase (`update public.config set valor = encode(extensions.gen_random_bytes(32),'hex') where clave='firma_secreto'; select valor from public.config where clave='firma_secreto';`), actualizar el secreto `CMK_FIRMA_SECRETO` en GitHub y **recompilar y repartir el APK**. Los APK con la clave anterior dejarán de funcionar.
+
+**Qué NO garantiza (límites reales):**
+- La clave está dentro del APK: quien lo descompile (jadx, apktool) puede extraerla y firmar por su cuenta. Esto sube mucho el esfuerzo respecto a abrir un navegador, pero no es infalible. Una garantía total exigiría atestación del dispositivo (Play Integrity) o celulares controlados.
+- Un celular con root o un emulador puede llamar a `Android.firmar` o leer la clave.
+- El APK de depuración (`assembleDebug`) es "debuggable". Se desactivó la inspección remota del WebView (`setWebContentsDebuggingEnabled(false)`) para que no se pueda llamar a `Android.firmar` desde `chrome://inspect`, pero un APK *release* firmado es más sólido: está pendiente.
+- Un alumno con la app legítima puede usar otro celular o una computadora a un lado para buscar respuestas; eso no lo evita la firma (solo el sensor, parcialmente).
+- Quien conozca una matrícula puede iniciar el intento de esa persona desde SU PROPIO celular con el APK legítimo (ver "Límite conocido").
 
 ## Cómo ve el examen el alumno (`index.html`)
 
@@ -103,17 +127,17 @@ Una página `file://` no tiene origen válido y YouTube responde "error de confi
 
 ## Permisos (RLS)
 
-Las políticas de admin sobre `preguntas`, `materias`, `resultados`, `alumnos` e `intentos` están limitadas al correo del profesor (no a cualquier usuario autenticado); `anon` solo lee preguntas y materias activas y no escribe directo en ninguna tabla: los resultados e intentos se crean únicamente vía RPC. `intentos`: admin puede leer y borrar. El panel debe avisar cuando la base no aplica un cambio; hoy lo hace solo en `alumnos` (ver "Pendiente" arriba).
+Las políticas de admin sobre `preguntas`, `materias`, `resultados`, `alumnos` e `intentos` están limitadas al correo del profesor (no a cualquier usuario autenticado); `anon` solo lee preguntas y materias activas y no escribe directo en ninguna tabla: los resultados e intentos se crean únicamente vía RPC. `intentos`: admin puede leer y borrar. `config`: RLS activada y sin políticas ni privilegios para `anon`/`authenticated` (guarda la clave de firma). `preguntas`: la política de lectura de `anon` ("anon lee preguntas activas si no se exige firma") solo da acceso mientras `config.exigir_firma` sea `false`; con `true`, las preguntas salen únicamente por `obtener_preguntas`. El admin sigue leyendo todo con sus propias políticas. El panel debe avisar cuando la base no aplica un cambio; hoy lo hace solo en `alumnos` (ver "Pendiente" arriba).
 
 ## Reglas para quien modifique el código (persona o IA)
 
 1. **Comenta el código.** Los comentarios son obligatorios: explican el *porqué*, no solo el qué, para que cualquiera pueda retomarlo.
 2. **Entrega archivos completos y listos para descargar**, no fragmentos.
 3. **Actualiza este README** en cada cambio relevante.
-4. **Nunca se envía la respuesta correcta al cliente.** `index.html` solo pide `texto, opciones, contexto, seccion`; la calificación la hace `calificar_examen` en Supabase. No agregar `correcta` al `select` del cliente.
+4. **Nunca se envía la respuesta correcta al cliente.** `obtener_preguntas` solo devuelve `texto, opciones, contexto, seccion`; la calificación la hace `calificar_examen` en Supabase. No agregar `correcta` a lo que devuelve `obtener_preguntas`.
 5. **Cualquier regla anti-trampa nueva debe terminar en `anularExamen()`** de `MainActivity.java`.
 6. **Los links externos romperían el examen**: abrir otra app (p. ej. YouTube) hace que la app pierda el foco y se anule. Los videos van *embebidos* (iframe), nunca como link.
-7. **El puente JS↔Java** (`Puente`, `window.Android`) tiene tres métodos: `iniciarExamen`, `terminarExamen`, `salir`. Si cambias nombres, cámbialos en `index.html` también.
+7. **El puente JS↔Java** (`Puente`, `window.Android`) tiene cuatro métodos: `iniciarExamen`, `terminarExamen`, `salir` y `firmar`. Si cambias nombres, cámbialos en `index.html` también.
 8. **No volver a agregar pasos al workflow que hagan commit/push** al repo (ver nota en `build.yml`).
 9. La clave `anon` de Supabase en `index.html` y `admin.html` es pública por diseño; la seguridad real está en las políticas RLS.
 10. **`DEPURAR_SENSOR` debe estar en `false`** en cualquier APK que se reparta a alumnos.
@@ -122,13 +146,18 @@ Las políticas de admin sobre `preguntas`, `materias`, `resultados`, `alumnos` e
 13. **Identidad de marca:** todo comentario, documento o variable que nombre a la empresa usa `PRISMAL MESH` (dos palabras separadas por un espacio). Los archivos nuevos llevan en el encabezado: `Propiedad intelectual de PRISMAL MESH. Todos los derechos reservados.`
 14. **El tiempo del examen lo manda el servidor.** `index.html` nunca inventa su propia hora de inicio: arranca el reloj con `restante_seg` de `iniciar_intento`. No volver a calcular la duración solo en el cliente.
 15. **Siempre `iniciar_intento` antes de pedir preguntas**, y `calificar_examen` solo con un intento en curso. Si cambias estas funciones en Supabase, revisa `index.html` y este README. Un APK anterior a este cambio ya no puede calificar.
+16. **Toda llamada nueva del alumno al servidor debe ir firmada** (`firmar()` en `index.html` → `Android.firmar` → `_verificar_firma` en Supabase). El texto firmado es `accion|matricula|materia|ts` y debe ser IDÉNTICO en el APK y en el servidor. No leer `preguntas` por REST desde el cliente ni dar `SELECT` de nuevo a `anon`.
+17. **La clave de firma nunca va en el repo, en `index.html`, en capturas ni en mensajes.** Solo en el secreto `CMK_FIRMA_SECRETO` de GitHub y en la tabla `config` (cerrada). Si se filtra, rotarla (ver "Firma de la app").
 
 ## Compilar
+
+**Requisito previo (una sola vez):** crear en GitHub el secreto `CMK_FIRMA_SECRETO` (repo → Settings → Secrets and variables → Actions → New repository secret) con el valor de `firma_secreto` de la tabla `config` de Supabase. Sin él, el workflow aborta. Para compilar en tu computadora: `gradle assembleDebug -Pcmk.firma=<valor>`.
 
 Push a `main` (o "Run workflow" en la pestaña Actions). El APK queda como artifact `checkmyknowledge-apk`. `admin.html` ya no vive aquí (repo CMKAdmin); no se compila: se abre aparte en un navegador.
 
 ## Historial de cambios
 
+- **2/oct/2026 (9)** — **Firma de la app** (anomalía crítica 1: el examen se podía presentar sin el APK usando la API pública). Supabase: tabla `config` (clave `firma_secreto` e interruptor `exigir_firma`, creado en `false`), funciones `_firma_exigida` y `_verificar_firma`, función nueva `obtener_preguntas`, y `iniciar_intento` / `calificar_examen` reemplazadas con parámetros `p_ts` y `p_firma` (además `calificar_examen` desempata por `id`); la política de lectura de `preguntas` para `anon` ahora depende del interruptor. `index.html`: función `firmar()`, las tres llamadas van firmadas, las preguntas se piden por RPC y hay mensajes para `Reloj desajustado` y `Firma`. `MainActivity.java`: método `Puente.firmar()` y depuración remota del WebView desactivada. `build.gradle.kts`: `BuildConfig.FIRMA_SECRETO` desde `CMK_FIRMA_SECRETO`, `versionCode` 2 / `versionName` 0.2. `build.yml`: pasa el secreto y aborta si falta. **Para activarlo:** crear el secreto en GitHub, recompilar e instalar el APK y poner `exigir_firma = 'true'` (ver "Firma de la app").
 - **2/oct/2026 (8)** — **Intento único por matrícula y materia.** Supabase: tabla `intentos` (RLS cerrada, admin lee y borra), índice único en `resultados(matricula, materia_id)`, función `duracion_examen()`, función nueva `iniciar_intento` (crea o reanuda el intento y devuelve los segundos restantes) y `calificar_examen` reemplazada (exige intento en curso y dentro de tiempo, y lo cierra). `index.html`: se eliminó `buscarAlumno`, se agregó `iniciarIntento`, el reloj arranca con `restante_seg` del servidor y se manejan los estados `usado` y `agotado` y los errores definitivos al calificar. `MainActivity.java`: solo comentarios (al reabrir tras una anulación se reanuda el intento; el reloj no se reinicia). **Rompe compatibilidad: hay que recompilar el APK.** Pendiente: que el panel libere intentos.
 - **2/oct/2026 (7)** — Alumno de prueba actualizado a `123456 · ROBLES GONZÁLEZ JOSÉ MANUEL · 10B` (README y tabla `alumnos` de Supabase). El panel pasó a su propio repo (CMKAdmin): se actualizó este README para describir solo lo que el panel tiene hoy y se movió lo demás a "Pendiente".
 - **2/oct/2026 (6)** — Identidad PRISMAL MESH en encabezados y documentación (regla 13).

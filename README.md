@@ -16,6 +16,15 @@ El profesor administra materias, secciones y preguntas, y ve resultados desde un
 
 Backend: Supabase (tablas `materias`, `preguntas`, `resultados`; función RPC `calificar_examen`).
 
+## Cómo ve el examen el alumno (`index.html`)
+
+- **Una sección por pantalla, con todas sus preguntas juntas.** Las preguntas se agrupan por el texto de `preguntas.seccion`: cada vez que cambia respecto a la pregunta anterior (en orden) empieza una sección nueva. Las preguntas seguidas sin sección forman un solo grupo sin título. Botones **← Sección anterior** / **Siguiente sección →**; el alumno puede volver a corregir respuestas.
+- **El contexto (video/texto) se muestra una sola vez** cuando varias preguntas seguidas de la misma sección lo comparten; reaparece si cambia. (Antes se repetía en cada pregunta porque había una por pantalla.)
+- **Temporizador de 1 hora** (`DURACION_MIN = 60` al inicio del `<script>`). Barra fija arriba con la cuenta regresiva; se pone roja en los últimos 5 min. Se calcula con una hora de fin (`Date.now()`), no restando 1 por tick. Al llegar a 0 el examen **se entrega solo** con lo contestado.
+- **Preguntas sin responder** se envían como `-1` en `p_respuestas` (nunca `null`), así el arreglo siempre lleva un número por pregunta y `-1` cuenta como mala. ⚠ Verifica que `calificar_examen` no falle con `-1` (si compara `respuesta = correcta` no hay problema).
+- En la última sección, si faltan respuestas se avisa una vez y el segundo toque en **Terminar de todos modos** entrega. No se usa `confirm()`: en el WebView no funciona y robaría el foco (anularía el examen).
+- El reloj corre solo en el cliente: si el alumno cierra la app, el examen se anula y empieza de cero con reloj nuevo (misma regla de siempre).
+
 ## Reglas anti-trampa (en `MainActivity.java`)
 
 Mientras el examen está activo, la app se **cierra por completo** y el alumno empieza de cero si:
@@ -60,6 +69,7 @@ Pestañas: **Preguntas · Secciones · Materias · Importar · Resultados**.
 Las secciones **no son una tabla**: son un texto libre en `preguntas.seccion` (así lo usa `index.html`). Por eso:
 - *Agregar* = poner ese texto a un grupo de preguntas, por rango de `#` de orden ("de la 11 a la 20 es Listening") o con las casillas de Preguntas.
 - *Renombrar* cambia el texto en todas sus preguntas. *Quitar sección* vacía el texto (las preguntas se conservan). *Borrar preguntas* elimina la sección con sus preguntas.
+- ⚠ Como el alumno ve **una sección por pantalla**, las preguntas de una sección deben tener `orden` consecutivo; si se intercalan con otra sección, se partirán en varias pantallas.
 
 ### Materias
 Crear, editar (nombre/orden), **Activar/Desactivar** (oculta a los alumnos sin borrar nada) y **Borrar**. Borrar una materia elimina sus preguntas y, con confirmación aparte, sus resultados. Si solo quieres ocultarla, desactívala.
@@ -72,7 +82,7 @@ Además de `FormApp.create`, `addMultipleChoiceItem`, `setTitle`, `createChoice`
 | `FormApp.create('Título')` | El título es la **sección** de sus preguntas |
 | `exam.addSectionHeaderItem().setTitle('Listening')` | Cambia la **sección** de las preguntas siguientes y reinicia el contexto |
 | `...setHelpText('texto')` (en el encabezado) | Ese texto es el **contexto** de las preguntas siguientes (p. ej. pasaje de lectura) |
-| `exam.addVideoItem().setVideoUrl('link YouTube')` | Las preguntas siguientes llevan ese **video** (se repite en cada una) hasta otro video o encabezado |
+| `exam.addVideoItem().setVideoUrl('link YouTube')` | Las preguntas siguientes llevan ese **video** (se guarda en cada una; el alumno lo ve una vez por bloque) hasta otro video o encabezado |
 | `item.setContext('link o texto')` / `item.setVideoUrl(...)` | Contexto solo para esa pregunta |
 | `exam.addPageBreakItem().setTitle('SECTION 1')` | Inicia una **sección** (título de la página); un encabezado posterior se agrega: `SECTION 1 · Part A` |
 | Link de YouTube dentro de un `setHelpText('... Click to play: URL')` | Se detecta y se guarda solo el video (la app muestra solo el video si hay link) |
@@ -97,6 +107,7 @@ El panel cuenta las filas afectadas por cada operación; si la base no deja modi
 8. **No volver a agregar pasos al workflow que hagan commit/push** al repo (ver nota en `build.yml`).
 9. La clave `anon` de Supabase en `index.html` y `admin.html` es pública por diseño; la seguridad real está en las políticas RLS.
 10. **`DEPURAR_SENSOR` debe estar en `false`** en cualquier APK que se reparta a alumnos.
+11. **No usar `alert()`/`confirm()`/`prompt()` en `index.html`**: abren un diálogo nativo que roba el foco y anula el examen. Usar mensajes dentro de la página.
 
 ## Compilar
 
@@ -104,6 +115,7 @@ Push a `main` (o "Run workflow" en la pestaña Actions). El APK queda como artif
 
 ## Historial de cambios
 
+- **2/oct/2026 (4)** — `index.html`: cada sección se muestra completa en una sola pantalla (todas sus preguntas), con navegación entre secciones; contexto mostrado una vez por bloque; temporizador de 60 min (`DURACION_MIN`) con entrega automática; preguntas sin responder se mandan como `-1`.
 - **2/oct/2026 (3)** — `MainActivity`: `index.html` se carga con origen https (`ORIGEN_BASE`) y DOM storage activo, para corregir el error de configuración del reproductor de YouTube.
 - **2/oct/2026 (2)** — Importador: corregido `Logger is not defined`; solo ejecuta funciones sin parámetros (antes truena con `addQuestion(...)`); soporta `addPageBreakItem` como sección y links de YouTube dentro de `setHelpText`.
 - **2/oct/2026** — `admin.html`: pestañas Materias y Secciones, selección y borrado masivo de preguntas, asignar/quitar secciones, soporte de video de YouTube y encabezados de sección en el script de importación, detección de operaciones bloqueadas por RLS.

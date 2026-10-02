@@ -1,5 +1,7 @@
 # CheckMyKnowledge
 
+**Propiedad intelectual exclusiva de PRISMAL MESH.** Todos los derechos reservados. Marca: `PRISMAL MESH` (dos palabras, mayúsculas, separadas por un espacio).
+
 App Android de exámenes de opción múltiple para alumnos, con reglas anti-trampa.
 El profesor administra materias, secciones y preguntas, y ve resultados desde un panel web (`admin.html`).
 
@@ -121,6 +123,7 @@ El panel cuenta las filas afectadas por cada operación; si la base no deja modi
 10. **`DEPURAR_SENSOR` debe estar en `false`** en cualquier APK que se reparta a alumnos.
 11. **No usar `alert()`/`confirm()`/`prompt()` en `index.html`**: abren un diálogo nativo que roba el foco y anula el examen. Usar mensajes dentro de la página.
 12. **La lista de alumnos nunca va en el cliente.** Vive en la tabla `alumnos` (RLS cerrada para `anon`); la app solo usa `validar_matricula` y `calificar_examen`. No dar permisos de lectura a `anon` sobre `alumnos`.
+13. **Identidad de marca:** todo comentario, documento o variable que nombre a la empresa usa `PRISMAL MESH` (dos palabras separadas por un espacio). Los archivos nuevos llevan en el encabezado: `Propiedad intelectual de PRISMAL MESH. Todos los derechos reservados.`
 
 ## Compilar
 
@@ -128,6 +131,7 @@ Push a `main` (o "Run workflow" en la pestaña Actions). El APK queda como artif
 
 ## Historial de cambios
 
+- **2/oct/2026 (6)** — Identidad PRISMAL MESH en encabezados y documentación (regla 13).
 - **2/oct/2026 (5)** — Acceso por **matrícula** validada en Supabase: tabla `alumnos` (RLS cerrada), funciones `validar_matricula` y `calificar_examen` nueva (recibe matrícula, reemplaza a la anterior), columnas `matricula` y `grupo` en `resultados`. `index.html` muestra nombre, matrícula y grupo en el encabezado fijo del examen.
 - **2/oct/2026 (4)** — `index.html`: cada sección se muestra completa en una sola pantalla (todas sus preguntas), con navegación entre secciones; contexto mostrado una vez por bloque; temporizador de 60 min (`DURACION_MIN`) con entrega automática; preguntas sin responder se mandan como `-1`.
 - **2/oct/2026 (3)** — `MainActivity`: `index.html` se carga con origen https (`ORIGEN_BASE`) y DOM storage activo, para corregir el error de configuración del reproductor de YouTube.

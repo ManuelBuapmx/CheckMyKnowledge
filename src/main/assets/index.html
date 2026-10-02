@@ -25,6 +25,14 @@
    - El reproductor de YouTube se pide sin botón de pantalla completa, sin logotipo ni
      anotaciones (fs, modestbranding, iv_load_policy), para reducir enlaces que saquen al
      alumno de la app (y la anulen). No elimina todos los enlaces posibles.
+
+  CAMBIO (2/oct/2026, 12): LÍMITE DE REANUDACIONES. Salir de la app y volver ya no es gratis:
+  el servidor cuenta cuántas veces el alumno vuelve a un intento al que YA se le entregaron
+  las preguntas. Se permiten MAX_REANUDACIONES (2); a la tercera, iniciar_intento cierra el
+  intento con 0 y responde el estado "anulado". El límite real vive en el servidor (fila
+  max_reanudaciones de la tabla config); MAX_REANUDACIONES de este archivo solo es para los
+  textos que ve el alumno: si cambias uno, cambia el otro. Un estado desconocido del servidor
+  se trata como examen cerrado (nunca abre el examen).
 -->
 <html lang="es">
 <head>
@@ -120,17 +128,21 @@ function firmar(accion, matricula, materia) {
 
 // ---- Intento único (en el servidor) ----
 // La lista de alumnos vive en la tabla "alumnos" de Supabase y el rol anon NO
-// puede leerla. Solo puede llamar a funciones RPC. iniciar_intento hace TRES cosas:
+// puede leerla. Solo puede llamar a funciones RPC. iniciar_intento hace CUATRO cosas:
 //   1. valida la matrícula (existe y está activa),
 //   2. crea el intento de esa matrícula+materia guardando la hora de inicio, o lo
 //      REANUDA si ya existía y sigue en curso (el alumno cerró/reinició la app),
-//   3. devuelve los segundos que le quedan, calculados con el reloj del servidor.
+//   3. cuenta las reanudaciones (solo si ya se le habían entregado las preguntas) y,
+//      si excede el límite, cierra el intento con 0,
+//   4. devuelve los segundos que le quedan, calculados con el reloj del servidor.
 // Regresa una promesa con un objeto { estado, ... }:
-//   "ok"          -> puede contestar; trae matricula, nombre, grupo y restante_seg
+//   "ok"          -> puede contestar; trae matricula, nombre, grupo, restante_seg,
+//                    reanudaciones (las que lleva) y max_reanudaciones
 //   "usado"       -> ya entregó este examen (no hay segundo intento)
 //   "agotado"     -> se le acabó el tiempo con la app cerrada; el servidor ya lo registró con 0
+//   "anulado"     -> excedió las reanudaciones permitidas; el servidor ya lo registró con 0
 //   "noregistrada"-> matrícula inexistente o desactivada
-// Los estados "usado" y "agotado" llegan como respuesta normal (no como error HTTP)
+// Los estados "usado", "agotado" y "anulado" llegan como respuesta normal (no como error HTTP)
 // porque el servidor necesita guardar el cierre con 0 sin que se revierta.
 function iniciarIntento(matricula, materia) {
   var m = String(matricula || "").replace(/\s+/g, "");
@@ -158,6 +170,10 @@ function iniciarIntento(matricula, materia) {
 // define el servidor (función duracion_examen() en Supabase). Si la cambias, cámbiala en ambos.
 var DURACION_MIN = 60;
 
+// Reanudaciones permitidas, SOLO PARA LOS TEXTOS: el límite real lo aplica el servidor (fila
+// max_reanudaciones de la tabla config). Si cambias uno, cambia el otro.
+var MAX_REANUDACIONES = 2;
+
 function cargarMaterias() {
   var url = SUPABASE_URL + "/rest/v1/materias?select=id,nombre&activa=eq.true&order=orden.asc";
   return fetch(url, {
@@ -173,6 +189,8 @@ function cargarPreguntas(materiaId, matricula) {
   // RPC obtener_preguntas, que exige un intento en curso y una firma válida de la app.
   // Nunca entrega la respuesta correcta — la calificación se hace del lado seguro, ver
   // calificarExamen(). "seccion" es la etiqueta opcional de agrupación (ver .seccion-label).
+  // Al entregarlas, el servidor marca el intento como "preguntas entregadas": desde ese momento
+  // cada regreso a este intento cuenta como una reanudación.
   var f = firmar("preguntas", matricula, materiaId);
   return fetch(SUPABASE_URL + "/rest/v1/rpc/obtener_preguntas", {
     method: "POST",
@@ -295,7 +313,7 @@ var PREGUNTAS = [];
 var SECCIONES = [];      // grupos de preguntas consecutivas con la misma sección (ver agruparSecciones)
 var secIdx = 0;          // sección que se está mostrando
 var app = document.getElementById("app");
-var alumno = null;       // { matricula, nombre, grupo } del alumno que accedió
+var alumno = null;       // { matricula, nombre, grupo, reanudaciones } del alumno que accedió
 var matriculaEscrita = ""; // lo último que escribió en el campo (por si vuelve atrás)
 var resp = [];
 var avisoFaltantes = false; // true tras avisar de preguntas sin responder (el 2.º toque ya termina)
@@ -424,7 +442,8 @@ function inicio() {
   inp.value = matriculaEscrita;
   c.appendChild(inp);
   c.appendChild(el("p", "Tendrás " + DURACION_MIN + " minutos para contestar y solo un intento. Al terminar el tiempo, el examen se entrega solo con lo que lleves.", "aviso"));
-  c.appendChild(el("p", "Al comenzar no podrás salir, minimizar, cambiar de pantalla ni tomar capturas. Si lo haces, la app se cierra: podrás volver a entrar con tu matrícula, pero el tiempo seguirá corriendo y tus respuestas se perderán.", "aviso"));
+  // CAMBIO (2/oct/2026, 12): se avisa del límite de reanudaciones ANTES de empezar.
+  c.appendChild(el("p", "Al comenzar no podrás salir, minimizar, cambiar de pantalla ni tomar capturas. Si lo haces, la app se cierra: podrás volver a entrar con tu matrícula, pero el tiempo seguirá corriendo y tus respuestas se perderán. Solo puedes volver a entrar " + MAX_REANUDACIONES + " veces; a la siguiente, el examen se cierra con calificación 0.", "aviso"));
   var msg = el("p", "", "aviso");
   c.appendChild(msg);
   var b = el("button", "Comenzar examen");
@@ -443,10 +462,13 @@ function inicio() {
       if (r.estado === "noregistrada") {
         var e = new Error("no-registrada"); e.noRegistrada = true; throw e;
       }
-      if (r.estado === "usado" || r.estado === "agotado") {
+      // CAMBIO (2/oct/2026, 12): cualquier estado que no sea "ok" (usado, agotado, anulado o uno
+      // desconocido de una versión futura del servidor) cierra el paso: NUNCA se abre el examen
+      // por un estado que esta app no entienda.
+      if (r.estado !== "ok") {
         var e2 = new Error("intento"); e2.intento = r.estado; throw e2;
       }
-      alumno = { matricula: r.matricula, nombre: r.nombre, grupo: r.grupo };
+      alumno = { matricula: r.matricula, nombre: r.nombre, grupo: r.grupo, reanudaciones: Number(r.reanudaciones) || 0 };
       restanteSeg = Number(r.restante_seg);
       // CAMBIO (2/oct/2026, 11): si el servidor dice que no queda tiempo (o manda algo que no es
       // un número), no tiene sentido abrir el examen: se trata como tiempo agotado. Antes, un
@@ -483,6 +505,10 @@ function inicio() {
         ? "Ya presentaste este examen. Si crees que es un error, avisa a tu profesor."
         : e && e.intento === "agotado"
         ? "Tu tiempo terminó mientras la app estaba cerrada y el examen se registró sin respuestas. Avisa a tu profesor."
+        : e && e.intento === "anulado"
+        ? "Saliste de la app más veces de las permitidas, así que el examen se cerró y se registró con calificación 0. Avisa a tu profesor."
+        : e && e.intento
+        ? "Este examen ya no está disponible. Avisa a tu profesor."
         : e && /Reloj desajustado/.test(e.message)
         ? "La hora de tu celular no es correcta. Actívala en automático (Ajustes > Fecha y hora) e inténtalo de nuevo."
         : e && /Firma/.test(e.message)
@@ -536,6 +562,12 @@ function pantallaSeccion() {
   var esUltima = secIdx + 1 >= SECCIONES.length;
   var c = el("div", "", "card");
   c.appendChild(el("p", "Sección " + (secIdx + 1) + " de " + SECCIONES.length + " · " + g.indices.length + " pregunta(s)"));
+  // CAMBIO (2/oct/2026, 12): si este intento ya se reanudó, se le recuerda al alumno cuántas
+  // reanudaciones lleva y que la siguiente salida de más cierra el examen con 0.
+  if (alumno && alumno.reanudaciones > 0) {
+    c.appendChild(el("p", "Reanudación " + alumno.reanudaciones + " de " + MAX_REANUDACIONES + " permitidas." +
+      (alumno.reanudaciones >= MAX_REANUDACIONES ? " Si vuelves a salir de la app, el examen se cerrará con calificación 0." : ""), "aviso"));
+  }
   if (g.nombre) c.appendChild(el("p", g.nombre, "seccion-label"));
 
   var iniciadores = [];   // funciones que arrancan los videos cuando la tarjeta ya está en pantalla

@@ -14,6 +14,17 @@
   (Android.firmar, ver MainActivity.java). Así el examen no se puede presentar desde un
   navegador o script usando solo la clave pública. Las preguntas ya NO se leen por REST:
   se piden con la RPC obtener_preguntas, que exige intento en curso y firma válida.
+
+  CAMBIO (2/oct/2026, 11): correcciones de la revisión de anomalías.
+   - El reloj usa performance.now() (reloj monotónico) y no Date.now(): cambiar la hora del
+     celular durante el examen ya no adelanta ni atrasa la entrega automática.
+   - Se arregló el "reloj huérfano": si el tiempo ya estaba vencido al arrancar, fin() se
+     ejecutaba ANTES de que existiera el intervalo y este quedaba corriendo, además de que
+     la pantalla de preguntas pisaba "Calificando...". Ahora un restante_seg <= 0 se trata
+     como "agotado" y el intervalo se registra antes del primer tick.
+   - El reproductor de YouTube se pide sin botón de pantalla completa, sin logotipo ni
+     anotaciones (fs, modestbranding, iv_load_policy), para reducir enlaces que saquen al
+     alumno de la app (y la anulen). No elimina todos los enlaces posibles.
 -->
 <html lang="es">
 <head>
@@ -252,7 +263,14 @@ function mensajeErrorVideo(codigo) {
 // "aviso" es el elemento donde se escribe el mensaje si algo falla.
 function crearReproductor(destino, idVideo, aviso) {
   function iniciar() {
-    var vars = { playsinline: 1, rel: 0 };
+    // Parámetros que reducen los enlaces que podrían sacar al alumno de la app (abrir YouTube
+    // fuera de la app hace perder el foco y anula el examen, ver regla 6 del README):
+    //   fs: 0              -> sin botón de pantalla completa
+    //   modestbranding: 1  -> sin logotipo de YouTube en la barra de control
+    //   iv_load_policy: 3  -> sin anotaciones/tarjetas del video
+    //   rel: 0             -> los videos relacionados salen del mismo canal
+    // No eliminan TODOS los enlaces (p. ej. el título o "Ver en YouTube" ante un error).
+    var vars = { playsinline: 1, rel: 0, fs: 0, modestbranding: 1, iv_load_policy: 3 };
     // origin = origen de esta página (https://<id de la app>, ver MainActivity.origenBase()).
     // Si el WebView reportara "null" no se manda, para no dar un origen inválido.
     if (window.location.origin && window.location.origin !== "null") vars.origin = window.location.origin;
@@ -284,7 +302,7 @@ var avisoFaltantes = false; // true tras avisar de preguntas sin responder (el 2
 
 // ---- Reloj ----
 var relojTimer = null;   // id del setInterval, o null si no corre
-var relojFin = 0;        // momento (ms desde 1970) en que se acaba el tiempo
+var relojFin = 0;        // valor de performance.now() (ms) en que se acaba el tiempo
 var examenTerminado = false; // evita calificar dos veces (p. ej. botón + fin del tiempo a la vez)
 
 document.addEventListener("contextmenu", function (e) { e.preventDefault(); });
@@ -307,10 +325,16 @@ function formatoTiempo(ms) {
 
 // Arranca el reloj con los SEGUNDOS RESTANTES que calculó el servidor (restanteSeg).
 // Al reanudar un intento (el alumno cerró la app) ese número ya viene descontado, así
-// el tiempo transcurrido con la app cerrada no se recupera. Se usa una HORA DE FIN
-// (Date.now() + restante) y no un contador que resta 1 cada segundo: así, si el WebView
-// atrasa algún tick, el tiempo restante sigue siendo correcto.
+// el tiempo transcurrido con la app cerrada no se recupera. Se usa una HORA DE FIN y no un
+// contador que resta 1 cada segundo: así, si el WebView atrasa algún tick, el tiempo restante
+// sigue siendo correcto.
+// CAMBIO (2/oct/2026, 11): la hora de fin se mide con performance.now() (reloj monotónico,
+// que no cambia si el alumno modifica la hora del celular) en vez de Date.now(). El servidor
+// sigue siendo quien manda: si por cualquier motivo el reloj local se desviara, calificar_examen
+// responde "Tiempo agotado" pasado el margen.
 function iniciarReloj(restanteSeg) {
+  // Por seguridad, si quedó un intervalo anterior se limpia (evita relojes duplicados).
+  if (relojTimer) { clearInterval(relojTimer); relojTimer = null; }
   var barra = document.getElementById("reloj");
   if (!barra) {
     barra = el("div");
@@ -322,15 +346,17 @@ function iniciarReloj(restanteSeg) {
   barra.appendChild(lineaTiempo);
   barra.appendChild(el("div", alumno.nombre + " · " + alumno.matricula + " · Grupo " + alumno.grupo, "reloj-alumno"));
   document.body.classList.add("con-reloj");
-  relojFin = Date.now() + restanteSeg * 1000;
+  relojFin = performance.now() + restanteSeg * 1000;
   function tick() {
-    var restante = relojFin - Date.now();
+    var restante = relojFin - performance.now();
     lineaTiempo.textContent = "⏱ " + formatoTiempo(restante);
     barra.className = restante <= 5 * 60 * 1000 ? "poco" : "";
     if (restante <= 0) fin(true); // se acabó el tiempo: se entrega lo que haya
   }
-  tick();
+  // El intervalo se registra ANTES del primer tick: si ese tick ya encuentra el tiempo vencido,
+  // fin() llama a detenerReloj() y debe poder limpiarlo (antes quedaba huérfano).
   relojTimer = setInterval(tick, 1000);
+  tick();
 }
 
 // Detiene y quita el reloj de la pantalla.
@@ -421,7 +447,13 @@ function inicio() {
         var e2 = new Error("intento"); e2.intento = r.estado; throw e2;
       }
       alumno = { matricula: r.matricula, nombre: r.nombre, grupo: r.grupo };
-      restanteSeg = r.restante_seg;
+      restanteSeg = Number(r.restante_seg);
+      // CAMBIO (2/oct/2026, 11): si el servidor dice que no queda tiempo (o manda algo que no es
+      // un número), no tiene sentido abrir el examen: se trata como tiempo agotado. Antes, un
+      // valor <= 0 arrancaba el reloj ya vencido y se entregaba en blanco sobre una pantalla rota.
+      if (!(restanteSeg > 0)) {
+        var e3 = new Error("intento"); e3.intento = "agotado"; throw e3;
+      }
       b.textContent = "Cargando preguntas...";
       return cargarPreguntas(materiaId, alumno.matricula);
     }).then(function (preguntas) {
@@ -437,8 +469,10 @@ function inicio() {
         resp = PREGUNTAS.map(function () { return -1; });
         examenTerminado = false;
         avisoFaltantes = false;
-        iniciarReloj(restanteSeg);
+        // Primero se dibuja la pantalla y DESPUÉS arranca el reloj: así, si el reloj entregara
+        // el examen de inmediato, "Calificando..." no es pisado por pantallaSeccion().
         pantallaSeccion();
+        iniciarReloj(restanteSeg);
       }, 300);
     }).catch(function (e) {
       // Si falló la red DESPUÉS de crear el intento, el reloj del servidor ya corre:

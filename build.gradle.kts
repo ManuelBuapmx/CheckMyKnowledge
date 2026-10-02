@@ -1,3 +1,5 @@
+// Propiedad intelectual de PRISMAL MESH. Todos los derechos reservados.
+//
 // Configuración de compilación de la app (módulo único, en la raíz del repo).
 // Se compila en GitHub Actions con `gradle assembleDebug` (ver .github/workflows/build.yml);
 // el APK sale en build/outputs/apk/debug/.
@@ -17,6 +19,23 @@ val firmaSecreto: String = System.getenv("CMK_FIRMA_SECRETO")
     ?: (project.findProperty("cmk.firma") as String?)
     ?: ""
 
+// Modo depuración del sensor (avisos Toast en MainActivity). POR DEFECTO ES false: antes era una
+// constante escrita a mano en MainActivity.java que había que acordarse de apagar, y como cada push
+// a main compila, el APK "normal" salía con los avisos. Ahora solo se enciende a propósito:
+//   - en GitHub: Actions > Compilar APK > Run workflow > marcar "depurar_sensor";
+//   - en tu computadora: `gradle assembleDebug -Pcmk.depurar=true`.
+val depurarSensor: Boolean =
+    System.getenv("CMK_DEPURAR_SENSOR") == "true" || project.findProperty("cmk.depurar") == "true"
+
+// Firma ESTABLE del APK. Sin esto, cada build en GitHub Actions usa un debug.keystore nuevo
+// (el runner es efímero), y Android rechaza instalar un APK encima de otro con distinta firma:
+// los alumnos tendrían que desinstalar antes de actualizar. Con una llave fija (que vive solo en
+// secretos de GitHub, ver README "Firma estable del APK") las actualizaciones se instalan encima.
+// Si no hay llave, se compila con la llave de depuración por defecto (funciona, pero sin
+// actualización encima).
+val keystoreArchivo: String = System.getenv("CMK_KEYSTORE_FILE") ?: ""
+val firmaEstable: Boolean = keystoreArchivo.isNotEmpty()
+
 android {
     // Identificador interno del código. Debe coincidir con el `package` de
     // MainActivity.java y con la carpeta src/main/java/com/prismalmesh/checkmyknowledge/.
@@ -31,12 +50,32 @@ android {
         targetSdk = 34
         // versionCode debe subir en cada versión que quieras que Android
         // reconozca como actualización; versionName es solo el texto visible.
-        versionCode = 2
-        versionName = "0.2"
+        versionCode = 3
+        versionName = "0.3"
 
         // Expone la clave como BuildConfig.FIRMA_SECRETO (la lee MainActivity). Es hexadecimal,
         // así que no necesita escapes dentro de las comillas.
         buildConfigField("String", "FIRMA_SECRETO", "\"$firmaSecreto\"")
+        // Expone el modo depuración como BuildConfig.DEPURAR_SENSOR (la lee MainActivity).
+        buildConfigField("boolean", "DEPURAR_SENSOR", depurarSensor.toString())
+    }
+
+    // Solo se define la firma si llegó la llave; si no, el bloque queda vacío.
+    signingConfigs {
+        if (firmaEstable) {
+            create("cmk") {
+                storeFile = file(keystoreArchivo)
+                storePassword = System.getenv("CMK_KEYSTORE_PASS")
+                keyAlias = System.getenv("CMK_KEY_ALIAS")
+                keyPassword = System.getenv("CMK_KEY_PASS")
+            }
+        }
+    }
+
+    buildTypes {
+        getByName("debug") {
+            if (firmaEstable) signingConfig = signingConfigs.getByName("cmk")
+        }
     }
 
     // AGP 8.x ya no genera BuildConfig por defecto: hay que pedirlo.

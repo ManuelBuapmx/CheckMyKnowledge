@@ -19,6 +19,10 @@ import android.widget.Toast;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 /**
  * Única Activity de la app. Es un "cascarón" nativo que:
@@ -57,6 +61,12 @@ import java.io.InputStream;
  * CAMBIO (2/oct/2026, 3): solo comentarios. Se corrigió la descripción de qué pasa
  * al reabrir la app tras una anulación (ahora reanuda el intento con el reloj del
  * servidor). La lógica de esta clase no cambió.
+ * CAMBIO (2/oct/2026, 4): FIRMA DE LA APP. Puente.firmar() firma con HMAC-SHA256 las llamadas de
+ * index.html al servidor, usando la clave BuildConfig.FIRMA_SECRETO (se inyecta al compilar desde
+ * el secreto CMK_FIRMA_SECRETO de GitHub; NUNCA va en el repo). El servidor (Supabase) conoce la
+ * misma clave y rechaza llamadas sin firma válida, así el examen no se puede presentar sin esta
+ * app. Además se desactiva la depuración remota del WebView: con ella, quien conecte el celular
+ * a una computadora podría ejecutar JS dentro de la página y llamar a Android.firmar().
  */
 public class MainActivity extends Activity {
 
@@ -233,6 +243,10 @@ public class MainActivity extends Activity {
         sensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
         sensorProximidad = sensorManager.getDefaultSensor(Sensor.TYPE_PROXIMITY);
 
+        // Sin inspección remota (chrome://inspect). Los APK de depuración la habilitan por
+        // defecto; se apaga explícitamente porque permitiría llamar a Android.firmar() a mano.
+        WebView.setWebContentsDebuggingEnabled(false);
+
         webView = new WebView(this);
         setContentView(webView);
 
@@ -302,6 +316,36 @@ public class MainActivity extends Activity {
         /** Botón "Salir" de la pantalla final: cierra la app y la quita de Recientes. */
         @JavascriptInterface
         public void salir() { runOnUiThread(() -> finishAndRemoveTask()); }
+
+        /**
+         * Firma una llamada al servidor. Devuelve "ts:firma" (ts = segundos Unix; firma = HMAC-SHA256
+         * en hexadecimal minúscula de "accion|matricula|materiaId|ts"), o "" si no se puede firmar.
+         * El servidor calcula lo MISMO con su copia de la clave y compara (ver _verificar_firma en
+         * Supabase): el formato del texto firmado debe coincidir exactamente en ambos lados.
+         *
+         * Solo firma las tres acciones que usa index.html. No corre en el hilo principal (es una
+         * llamada síncrona desde el hilo del WebView) y no toca estado compartido, así que es seguro.
+         * Si la clave quedó vacía (APK compilado sin el secreto), devuelve "" y el servidor rechazará
+         * la llamada: preferible a un APK que parezca funcionar y no pueda calificar a nadie.
+         */
+        @JavascriptInterface
+        public String firmar(String accion, String matricula, String materiaId) {
+            if (!"iniciar".equals(accion) && !"preguntas".equals(accion) && !"calificar".equals(accion)) return "";
+            String secreto = BuildConfig.FIRMA_SECRETO;
+            if (secreto == null || secreto.isEmpty() || matricula == null || materiaId == null) return "";
+            try {
+                long ts = System.currentTimeMillis() / 1000L;
+                String dato = accion + "|" + matricula + "|" + materiaId + "|" + ts;
+                Mac mac = Mac.getInstance("HmacSHA256");
+                mac.init(new SecretKeySpec(secreto.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+                byte[] hash = mac.doFinal(dato.getBytes(StandardCharsets.UTF_8));
+                StringBuilder hex = new StringBuilder();
+                for (byte b : hash) hex.append(String.format("%02x", b));
+                return ts + ":" + hex;
+            } catch (Exception e) {
+                return "";
+            }
+        }
     }
 
     @Override

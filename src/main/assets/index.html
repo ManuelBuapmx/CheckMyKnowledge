@@ -12,18 +12,34 @@
   button { width: 100%; padding: 14px; margin-top: 10px; font-size: 16px; border: 0; border-radius: 10px; background: #1565c0; color: #fff; }
   button.op { background: #fff; color: #222; border: 2px solid #ccc; text-align: left; }
   button.op.sel { border-color: #1565c0; background: #e3f2fd; }
+  /* Botón secundario (p. ej. "Sección anterior"). */
+  button.sec { background: #fff; color: #1565c0; border: 2px solid #1565c0; }
   button:disabled { opacity: .4; }
   input { width: 100%; padding: 12px; font-size: 16px; border: 2px solid #ccc; border-radius: 10px; -webkit-user-select: text; user-select: text; }
   .aviso { font-size: 14px; color: #b71c1c; }
   /* Etiqueta de sección (p. ej. "Unidad 1 - Present Simple"): agrupa/organiza
      preguntas de una misma materia. Es solo texto libre en preguntas.seccion —
-     no es una tabla aparte ni afecta la calificación, nomás se muestra arriba
-     de la pregunta cuando la trae. Se importa automáticamente desde el panel
-     de admin: cada FormApp.create(título) del script se vuelve una sección. */
+     no es una tabla aparte ni afecta la calificación. Ahora la sección es la
+     pantalla completa: todas sus preguntas se muestran juntas debajo de ella. */
   .seccion-label {
     font-size: 13px; font-weight: 700; color: #1565c0; text-transform: uppercase;
     letter-spacing: .3px; margin: -4px 0 8px;
   }
+  /* Cada pregunta dentro de la pantalla de sección va separada por una línea. */
+  .pregunta-bloque { padding: 14px 0; border-top: 1px solid #e0e0e0; }
+  .pregunta-bloque:first-of-type { border-top: 0; }
+  .pregunta-bloque h2 { font-size: 17px; margin: 0 0 4px; }
+  /* --- Reloj del examen ---
+     Barra fija arriba, FUERA de #app, para que siga visible y no se borre cuando
+     se cambia de sección (pantalla() solo reemplaza el contenido de #app). */
+  #reloj {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 10; text-align: center;
+    padding: 8px; font-size: 18px; font-weight: 700; background: #1565c0; color: #fff;
+    font-variant-numeric: tabular-nums;
+  }
+  /* Últimos 5 minutos: se pone rojo para avisar al alumno. */
+  #reloj.poco { background: #b71c1c; }
+  body.con-reloj { padding-top: 56px; }
   /* --- Contexto por pregunta (video embebido o texto de apoyo/lectura) ---
      El video SIEMPRE va embebido (iframe), nunca como link externo: un link
      que abra YouTube fuera de la app cancelaría el examen (ver anularExamen()
@@ -53,6 +69,9 @@
 // (aquí: leer solo preguntas activas, e insertar resultados, nada más).
 var SUPABASE_URL = "https://juvqvshcfsrtscvzluaa.supabase.co";
 var SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp1dnF2c2hjZnNydHNjdnpsdWFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAzMDY4NjQsImV4cCI6MjEwNTg4Mjg2NH0.aL2bzJbTJ6DfzUlh8UaSBZ5Fah3Bae1tNBDi7R6BD68";
+
+// Duración total del examen, en minutos. Cámbiala aquí si hace falta.
+var DURACION_MIN = 60;
 
 function cargarMaterias() {
   var url = SUPABASE_URL + "/rest/v1/materias?select=id,nombre&activa=eq.true&order=orden.asc";
@@ -113,12 +132,9 @@ function extraerIdYoutube(texto) {
 }
 
 // ---- Reproductor de YouTube (API oficial de iframe) ----
-// CAMBIO (2/oct/2026): antes el video era un <iframe src=".../embed/ID"> a pelo. Eso
-// daba "error de configuración del reproductor" (153) o "video no disponible" sin
-// decir por qué. Con la API oficial (YT.Player) la página se identifica ante YouTube
-// con su origen (parámetro "origin"), que es lo que el reproductor exige, y además
-// la API avisa el CÓDIGO del error (onError), que ahora se muestra bajo el video
-// para saber la causa real en vez de adivinar.
+// La página se identifica ante YouTube con su origen (parámetro "origin"), que
+// es lo que el reproductor exige, y la API avisa el CÓDIGO del error (onError),
+// que se muestra bajo el video para saber la causa real.
 //
 // La API es https://www.youtube.com/iframe_api; al cargar llama a la función global
 // onYouTubeIframeAPIReady. Mientras no esté lista, las peticiones de video se
@@ -176,8 +192,16 @@ function crearReproductor(destino, idVideo, aviso) {
 var MATERIAS = [];
 var materiaId = null;
 var PREGUNTAS = [];
+var SECCIONES = [];      // grupos de preguntas consecutivas con la misma sección (ver agruparSecciones)
+var secIdx = 0;          // sección que se está mostrando
 var app = document.getElementById("app");
-var nombre = "", idx = 0, resp = [];
+var nombre = "", resp = [];
+var avisoFaltantes = false; // true tras avisar de preguntas sin responder (el 2.º toque ya termina)
+
+// ---- Reloj ----
+var relojTimer = null;   // id del setInterval, o null si no corre
+var relojFin = 0;        // momento (ms desde 1970) en que se acaba el tiempo
+var examenTerminado = false; // evita calificar dos veces (p. ej. botón + fin del tiempo a la vez)
 
 document.addEventListener("contextmenu", function (e) { e.preventDefault(); });
 
@@ -187,7 +211,45 @@ function el(tag, texto, clase) {
   if (clase) e.className = clase;
   return e;
 }
-function pantalla(card) { app.innerHTML = ""; app.appendChild(card); }
+function pantalla(card) { app.innerHTML = ""; app.appendChild(card); window.scrollTo(0, 0); }
+
+// Formatea milisegundos como mm:ss (o h:mm:ss si hay horas).
+function formatoTiempo(ms) {
+  var s = Math.max(0, Math.ceil(ms / 1000));
+  var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), seg = s % 60;
+  function dos(n) { return (n < 10 ? "0" : "") + n; }
+  return (h > 0 ? h + ":" : "") + dos(m) + ":" + dos(seg);
+}
+
+// Arranca el reloj. Se usa una HORA DE FIN (Date.now() + duración) y no un
+// contador que resta 1 cada segundo: así, si el WebView atrasa algún tick, el
+// tiempo restante sigue siendo correcto.
+function iniciarReloj() {
+  var barra = document.getElementById("reloj");
+  if (!barra) {
+    barra = el("div");
+    barra.id = "reloj";
+    document.body.appendChild(barra);
+  }
+  document.body.classList.add("con-reloj");
+  relojFin = Date.now() + DURACION_MIN * 60 * 1000;
+  function tick() {
+    var restante = relojFin - Date.now();
+    barra.textContent = "⏱ " + formatoTiempo(restante);
+    barra.className = restante <= 5 * 60 * 1000 ? "poco" : "";
+    if (restante <= 0) fin(true); // se acabó el tiempo: se entrega lo que haya
+  }
+  tick();
+  relojTimer = setInterval(tick, 1000);
+}
+
+// Detiene y quita el reloj de la pantalla.
+function detenerReloj() {
+  if (relojTimer) { clearInterval(relojTimer); relojTimer = null; }
+  var barra = document.getElementById("reloj");
+  if (barra) barra.parentNode.removeChild(barra);
+  document.body.classList.remove("con-reloj");
+}
 
 function elegirMateria() {
   var c = el("div", "", "card");
@@ -221,6 +283,20 @@ function elegirMateria() {
   });
 }
 
+// Agrupa las preguntas (ya ordenadas) en secciones: cada vez que cambia el
+// texto de "seccion" respecto a la pregunta anterior empieza un grupo nuevo.
+// Las preguntas sin sección que van seguidas forman un solo grupo sin título.
+// Cada grupo guarda los ÍNDICES en PREGUNTAS (así resp[] sigue siendo plano).
+function agruparSecciones(preguntas) {
+  var grupos = [];
+  preguntas.forEach(function (p, i) {
+    var ultimo = grupos[grupos.length - 1];
+    if (ultimo && ultimo.nombre === p.s) ultimo.indices.push(i);
+    else grupos.push({ nombre: p.s, indices: [i] });
+  });
+  return grupos;
+}
+
 function inicio() {
   var c = el("div", "", "card");
   c.appendChild(el("h1", "CheckMyKnowledge"));
@@ -230,6 +306,7 @@ function inicio() {
   inp.setAttribute("autocomplete", "off");
   inp.value = nombre;
   c.appendChild(inp);
+  c.appendChild(el("p", "Tendrás " + DURACION_MIN + " minutos para contestar. Al terminar el tiempo, el examen se entrega solo con lo que lleves.", "aviso"));
   c.appendChild(el("p", "Al comenzar no podrás salir, minimizar, cambiar de pantalla ni tomar capturas. Si lo haces, el examen se cierra y deberás empezar de nuevo.", "aviso"));
   var msg = el("p", "", "aviso");
   c.appendChild(msg);
@@ -244,10 +321,18 @@ function inicio() {
     cargarPreguntas(materiaId).then(function (preguntas) {
       if (!preguntas.length) throw new Error("No hay preguntas activas");
       PREGUNTAS = preguntas;
+      SECCIONES = agruparSecciones(preguntas);
       setTimeout(function () {
         if (window.Android) Android.iniciarExamen();
-        idx = 0; resp = [];
-        pregunta();
+        secIdx = 0;
+        // -1 = sin responder. Se usa -1 (y no un hueco/null) para que el arreglo
+        // enviado al servidor siempre lleve un número por pregunta; -1 nunca
+        // coincide con una opción correcta, así que cuenta como mala.
+        resp = PREGUNTAS.map(function () { return -1; });
+        examenTerminado = false;
+        avisoFaltantes = false;
+        iniciarReloj();
+        pantallaSeccion();
       }, 300);
     }).catch(function () {
       msg.textContent = "No se pudieron cargar las preguntas. Revisa tu conexión e inténtalo de nuevo.";
@@ -259,12 +344,9 @@ function inicio() {
   pantalla(c);
 }
 
-// Arma el bloque de "contexto" que va arriba de la pregunta (si la pregunta
-// trae uno): video de YouTube si se detecta un link, o un bloque de
-// texto plano si no (instrucciones, pasaje de lectura, etc.). Se reconstruye
-// en cada pregunta, así que si varias preguntas seguidas comparten el mismo
-// contexto (por ejemplo, todo un pasaje de lectura), se repite en cada una
-// — así lo pidió el profesor, para que el alumno no tenga que ir y venir.
+// Arma el bloque de "contexto" que va arriba de una pregunta (si trae uno):
+// video de YouTube si se detecta un link, o un bloque de texto plano si no
+// (instrucciones, pasaje de lectura, etc.).
 //
 // Regresa { nodo, iniciar }: "nodo" es lo que se agrega a la pantalla; "iniciar"
 // (solo en videos) se llama DESPUÉS de que el nodo ya está en el documento, porque
@@ -287,42 +369,89 @@ function bloqueContexto(p) {
   return { nodo: el("div", p.x, "contexto-texto"), iniciar: null };
 }
 
-function pregunta() {
-  var p = PREGUNTAS[idx];
+// Cuenta cuántas preguntas de TODO el examen siguen sin responder.
+function contarSinResponder() {
+  return resp.filter(function (r) { return r < 0; }).length;
+}
+
+// Muestra UNA sección completa: todas sus preguntas en la misma pantalla.
+// CAMBIO (2/oct/2026): antes se mostraba una pregunta por pantalla.
+// El contexto (video/texto) se muestra solo cuando cambia respecto a la
+// pregunta anterior de la sección; si 10 preguntas comparten un mismo video o
+// pasaje, aparece una vez arriba de ellas y no 10 veces.
+function pantallaSeccion() {
+  var g = SECCIONES[secIdx];
+  var esUltima = secIdx + 1 >= SECCIONES.length;
   var c = el("div", "", "card");
-  c.appendChild(el("p", "Pregunta " + (idx + 1) + " de " + PREGUNTAS.length));
-  // Sección (opcional): se muestra siempre que la pregunta la traiga, aunque
-  // se repita entre preguntas consecutivas de la misma unidad — sirve de
-  // recordatorio constante de en qué parte del examen va el alumno.
-  if (p.s) c.appendChild(el("p", p.s, "seccion-label"));
-  var contexto = bloqueContexto(p);
-  if (contexto) c.appendChild(contexto.nodo);
-  c.appendChild(el("h1", p.t));
-  var sig = el("button", idx + 1 < PREGUNTAS.length ? "Siguiente" : "Terminar");
-  sig.disabled = resp[idx] === undefined;
-  p.o.forEach(function (txt, i) {
-    var b = el("button", String.fromCharCode(65 + i) + ") " + txt, "op" + (resp[idx] === i ? " sel" : ""));
-    b.onclick = function () {
-      resp[idx] = i;
-      var todos = c.querySelectorAll(".op");
-      for (var k = 0; k < todos.length; k++) todos[k].className = "op" + (k === i ? " sel" : "");
-      sig.disabled = false;
-    };
-    c.appendChild(b);
+  c.appendChild(el("p", "Sección " + (secIdx + 1) + " de " + SECCIONES.length + " · " + g.indices.length + " pregunta(s)"));
+  if (g.nombre) c.appendChild(el("p", g.nombre, "seccion-label"));
+
+  var iniciadores = [];   // funciones que arrancan los videos cuando la tarjeta ya está en pantalla
+  var contextoPrevio = null;
+
+  g.indices.forEach(function (qi) {
+    var p = PREGUNTAS[qi];
+    var bloque = el("div", "", "pregunta-bloque");
+    if (p.x && p.x !== contextoPrevio) {
+      var ctx = bloqueContexto(p);
+      bloque.appendChild(ctx.nodo);
+      if (ctx.iniciar) iniciadores.push(ctx.iniciar);
+    }
+    contextoPrevio = p.x || null;
+
+    bloque.appendChild(el("h2", (qi + 1) + ". " + p.t));
+    p.o.forEach(function (txt, i) {
+      var b = el("button", String.fromCharCode(65 + i) + ") " + txt, "op" + (resp[qi] === i ? " sel" : ""));
+      b.onclick = function () {
+        resp[qi] = i;
+        // Solo se repintan las opciones de ESTA pregunta (no se vuelve a dibujar
+        // la pantalla, para no reiniciar los videos).
+        var hermanas = bloque.querySelectorAll(".op");
+        for (var k = 0; k < hermanas.length; k++) hermanas[k].className = "op" + (k === i ? " sel" : "");
+      };
+      bloque.appendChild(b);
+    });
+    c.appendChild(bloque);
   });
+
+  var msg = el("p", avisoFaltantes && esUltima ? "Te faltan " + contarSinResponder() + " pregunta(s) sin responder. Revisa las secciones anteriores o toca de nuevo para terminar." : "", "aviso");
+  c.appendChild(msg);
+
+  if (secIdx > 0) {
+    var ant = el("button", "← Sección anterior", "sec");
+    ant.onclick = function () { secIdx--; pantallaSeccion(); };
+    c.appendChild(ant);
+  }
+  var sig = el("button", esUltima ? (avisoFaltantes ? "Terminar de todos modos" : "Terminar examen") : "Siguiente sección →");
   sig.onclick = function () {
-    if (idx + 1 < PREGUNTAS.length) { idx++; pregunta(); } else { fin(); }
+    if (!esUltima) { secIdx++; pantallaSeccion(); return; }
+    // Última sección: si faltan respuestas se avisa UNA vez (sin confirm(), que
+    // en el WebView no funciona y además robaría el foco y anularía el examen).
+    var faltan = contarSinResponder();
+    if (faltan > 0 && !avisoFaltantes) {
+      avisoFaltantes = true;
+      msg.textContent = "Te faltan " + faltan + " pregunta(s) sin responder. Revisa las secciones anteriores o toca de nuevo para terminar.";
+      sig.textContent = "Terminar de todos modos";
+      return;
+    }
+    fin(false);
   };
   c.appendChild(sig);
   pantalla(c);
-  // El reproductor se crea hasta que la tarjeta ya está en pantalla (ver bloqueContexto).
-  if (contexto && contexto.iniciar) contexto.iniciar();
+  // Los reproductores se crean hasta que la tarjeta ya está en pantalla (ver bloqueContexto).
+  iniciadores.forEach(function (f) { f(); });
 }
 
-function fin() {
+// Termina el examen (por botón o por fin del tiempo) y manda a calificar.
+// "porTiempo" solo cambia el texto que ve el alumno.
+function fin(porTiempo) {
+  if (examenTerminado) return; // ya se está calificando
+  examenTerminado = true;
+  detenerReloj();
   if (window.Android) Android.terminarExamen();
   var c = el("div", "", "card");
   c.appendChild(el("h1", "Calificando..."));
+  if (porTiempo) c.appendChild(el("p", "Se acabó el tiempo. Se entregan las respuestas que llevabas.", "aviso"));
   c.appendChild(el("p", "Espera un momento."));
   pantalla(c);
   intentarCalificar();

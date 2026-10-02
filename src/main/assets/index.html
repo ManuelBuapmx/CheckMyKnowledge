@@ -2,6 +2,12 @@
 <!--
   CheckMy Knowledge · App del alumno
   Propiedad intelectual de PRISMAL MESH. Todos los derechos reservados.
+
+  CAMBIO (2/oct/2026, 8): UN INTENTO por matrícula y materia. Al comenzar, la app llama a
+  iniciar_intento (Supabase), que guarda la hora de inicio EN EL SERVIDOR. Si el alumno cierra
+  o reinicia la app puede volver a entrar con su matrícula, pero el reloj NO se detiene: el
+  servidor devuelve los segundos que le quedan. El intento termina al entregar o al acabarse
+  el tiempo. Ya no existe buscarAlumno(); la validación de matrícula la hace iniciar_intento.
 -->
 <html lang="es">
 <head>
@@ -77,33 +83,43 @@
 var SUPABASE_URL = "https://juvqvshcfsrtscvzluaa.supabase.co";
 var SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp1dnF2c2hjZnNydHNjdnpsdWFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAzMDY4NjQsImV4cCI6MjEwNTg4Mjg2NH0.aL2bzJbTJ6DfzUlh8UaSBZ5Fah3Bae1tNBDi7R6BD68";
 
-// ---- Validación de matrícula (en el servidor) ----
+// ---- Intento único (en el servidor) ----
 // La lista de alumnos vive en la tabla "alumnos" de Supabase y el rol anon NO
-// puede leerla. Solo puede llamar a validar_matricula, que devuelve nombre y
-// grupo de UNA matrícula exacta (o error si no existe / está desactivada).
-// Regresa una promesa con { matricula, nombre, grupo } o null si no está registrada.
-function buscarAlumno(matricula) {
+// puede leerla. Solo puede llamar a funciones RPC. iniciar_intento hace TRES cosas:
+//   1. valida la matrícula (existe y está activa),
+//   2. crea el intento de esa matrícula+materia guardando la hora de inicio, o lo
+//      REANUDA si ya existía y sigue en curso (el alumno cerró/reinició la app),
+//   3. devuelve los segundos que le quedan, calculados con el reloj del servidor.
+// Regresa una promesa con un objeto { estado, ... }:
+//   "ok"          -> puede contestar; trae matricula, nombre, grupo y restante_seg
+//   "usado"       -> ya entregó este examen (no hay segundo intento)
+//   "agotado"     -> se le acabó el tiempo con la app cerrada; el servidor ya lo registró con 0
+//   "noregistrada"-> matrícula inexistente o desactivada
+// Los estados "usado" y "agotado" llegan como respuesta normal (no como error HTTP)
+// porque el servidor necesita guardar el cierre con 0 sin que se revierta.
+function iniciarIntento(matricula, materia) {
   var m = String(matricula || "").replace(/\s+/g, "");
-  if (!m) return Promise.resolve(null);
-  return fetch(SUPABASE_URL + "/rest/v1/rpc/validar_matricula", {
+  if (!m) return Promise.resolve({ estado: "noregistrada" });
+  return fetch(SUPABASE_URL + "/rest/v1/rpc/iniciar_intento", {
     method: "POST",
     headers: {
       apikey: SUPABASE_ANON_KEY,
       Authorization: "Bearer " + SUPABASE_ANON_KEY,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({ p_matricula: m })
+    body: JSON.stringify({ p_matricula: m, p_materia_id: materia })
   }).then(function (resp) {
     if (resp.ok) return resp.json();
     return resp.text().then(function (t) {
       // La función lanza 'Matrícula no registrada' → es un rechazo normal, no un fallo de red.
-      if (t.indexOf("Matrícula no registrada") !== -1) return null;
-      throw new Error(t || "No se pudo validar la matrícula");
+      if (t.indexOf("Matrícula no registrada") !== -1) return { estado: "noregistrada" };
+      throw new Error(t || "No se pudo iniciar el intento");
     });
   });
 }
 
-// Duración total del examen, en minutos. Cámbiala aquí si hace falta.
+// Duración total del examen, en minutos. SOLO SE MUESTRA al alumno: la duración real la
+// define el servidor (función duracion_examen() en Supabase). Si la cambias, cámbiala en ambos.
 var DURACION_MIN = 60;
 
 function cargarMaterias() {
@@ -138,6 +154,8 @@ function cargarPreguntas(materiaId) {
 // La calificación se calcula en el servidor (función calificar_examen), que es
 // la única que puede leer cuál era la opción correcta. El cliente nunca la ve,
 // ni antes ni después: solo recibe el resultado ya calculado.
+// El servidor además EXIGE que exista un intento en curso (creado por iniciar_intento)
+// y dentro de tiempo, y lo cierra al calificar: no hay segunda calificación posible.
 function calificarExamen(materiaId, matricula, respuestas) {
   var url = SUPABASE_URL + "/rest/v1/rpc/calificar_examen";
   return fetch(url, {
@@ -256,10 +274,12 @@ function formatoTiempo(ms) {
   return (h > 0 ? h + ":" : "") + dos(m) + ":" + dos(seg);
 }
 
-// Arranca el reloj. Se usa una HORA DE FIN (Date.now() + duración) y no un
-// contador que resta 1 cada segundo: así, si el WebView atrasa algún tick, el
-// tiempo restante sigue siendo correcto.
-function iniciarReloj() {
+// Arranca el reloj con los SEGUNDOS RESTANTES que calculó el servidor (restanteSeg).
+// Al reanudar un intento (el alumno cerró la app) ese número ya viene descontado, así
+// el tiempo transcurrido con la app cerrada no se recupera. Se usa una HORA DE FIN
+// (Date.now() + restante) y no un contador que resta 1 cada segundo: así, si el WebView
+// atrasa algún tick, el tiempo restante sigue siendo correcto.
+function iniciarReloj(restanteSeg) {
   var barra = document.getElementById("reloj");
   if (!barra) {
     barra = el("div");
@@ -271,7 +291,7 @@ function iniciarReloj() {
   barra.appendChild(lineaTiempo);
   barra.appendChild(el("div", alumno.nombre + " · " + alumno.matricula + " · Grupo " + alumno.grupo, "reloj-alumno"));
   document.body.classList.add("con-reloj");
-  relojFin = Date.now() + DURACION_MIN * 60 * 1000;
+  relojFin = Date.now() + restanteSeg * 1000;
   function tick() {
     var restante = relojFin - Date.now();
     lineaTiempo.textContent = "⏱ " + formatoTiempo(restante);
@@ -346,8 +366,8 @@ function inicio() {
   inp.setAttribute("autocomplete", "off");
   inp.value = matriculaEscrita;
   c.appendChild(inp);
-  c.appendChild(el("p", "Tendrás " + DURACION_MIN + " minutos para contestar. Al terminar el tiempo, el examen se entrega solo con lo que lleves.", "aviso"));
-  c.appendChild(el("p", "Al comenzar no podrás salir, minimizar, cambiar de pantalla ni tomar capturas. Si lo haces, el examen se cierra y deberás empezar de nuevo.", "aviso"));
+  c.appendChild(el("p", "Tendrás " + DURACION_MIN + " minutos para contestar y solo un intento. Al terminar el tiempo, el examen se entrega solo con lo que lleves.", "aviso"));
+  c.appendChild(el("p", "Al comenzar no podrás salir, minimizar, cambiar de pantalla ni tomar capturas. Si lo haces, la app se cierra: podrás volver a entrar con tu matrícula, pero el tiempo seguirá corriendo y tus respuestas se perderán.", "aviso"));
   var msg = el("p", "", "aviso");
   c.appendChild(msg);
   var b = el("button", "Comenzar examen");
@@ -358,13 +378,19 @@ function inicio() {
     b.disabled = true;
     b.textContent = "Verificando...";
     msg.textContent = "";
-    // Primero se valida la matrícula en el servidor; solo si existe se piden las preguntas.
-    // El mensaje de rechazo no da pistas de matrículas parecidas.
-    buscarAlumno(matriculaEscrita).then(function (encontrado) {
-      if (!encontrado) {
+    // Segundos que le quedan, según el servidor (al reanudar son menos que la duración total).
+    var restanteSeg = 0;
+    // Primero se inicia/reanuda el intento en el servidor (valida la matrícula); solo si
+    // procede se piden las preguntas. Los mensajes de rechazo no dan pistas de matrículas parecidas.
+    iniciarIntento(matriculaEscrita, materiaId).then(function (r) {
+      if (r.estado === "noregistrada") {
         var e = new Error("no-registrada"); e.noRegistrada = true; throw e;
       }
-      alumno = encontrado;
+      if (r.estado === "usado" || r.estado === "agotado") {
+        var e2 = new Error("intento"); e2.intento = r.estado; throw e2;
+      }
+      alumno = { matricula: r.matricula, nombre: r.nombre, grupo: r.grupo };
+      restanteSeg = r.restante_seg;
       b.textContent = "Cargando preguntas...";
       return cargarPreguntas(materiaId);
     }).then(function (preguntas) {
@@ -380,12 +406,18 @@ function inicio() {
         resp = PREGUNTAS.map(function () { return -1; });
         examenTerminado = false;
         avisoFaltantes = false;
-        iniciarReloj();
+        iniciarReloj(restanteSeg);
         pantallaSeccion();
       }, 300);
     }).catch(function (e) {
+      // Si falló la red DESPUÉS de crear el intento, el reloj del servidor ya corre:
+      // al reintentar, el alumno lo reanuda con el tiempo que le quede.
       msg.textContent = e && e.noRegistrada
         ? "Matrícula no registrada. Revísala o avisa a tu profesor."
+        : e && e.intento === "usado"
+        ? "Ya presentaste este examen. Si crees que es un error, avisa a tu profesor."
+        : e && e.intento === "agotado"
+        ? "Tu tiempo terminó mientras la app estaba cerrada y el examen se registró sin respuestas. Avisa a tu profesor."
         : "No se pudo continuar. Revisa tu conexión e inténtalo de nuevo.";
       b.disabled = false;
       b.textContent = "Comenzar examen";
@@ -517,12 +549,18 @@ function intentarCalificar() {
     b.onclick = function () { if (window.Android) Android.salir(); else elegirMateria(); };
     c.appendChild(b);
     pantalla(c);
-  }).catch(function () {
+  }).catch(function (e) {
+    // Errores DEFINITIVOS del servidor (tiempo vencido, intento ya cerrado): reintentar no
+    // sirve de nada, así que se ofrece salir en vez de "Reintentar". Cualquier otro error
+    // se trata como fallo de red y se puede reintentar (las respuestas siguen en memoria).
+    var definitivo = !!(e && /Tiempo agotado|Intento ya utilizado|No hay un intento/.test(e.message));
     var c = el("div", "", "card");
     c.appendChild(el("h1", "No se pudo calificar"));
-    c.appendChild(el("p", "Revisa tu conexión e inténtalo de nuevo. Tus respuestas no se han perdido.", "aviso"));
-    var b = el("button", "Reintentar");
-    b.onclick = intentarCalificar;
+    c.appendChild(el("p", definitivo
+      ? "Tu tiempo ya terminó o el intento se cerró. Avisa a tu profesor."
+      : "Revisa tu conexión e inténtalo de nuevo. Tus respuestas no se han perdido.", "aviso"));
+    var b = el("button", definitivo ? "Salir" : "Reintentar");
+    b.onclick = definitivo ? function () { if (window.Android) Android.salir(); else elegirMateria(); } : intentarCalificar;
     c.appendChild(b);
     pantalla(c);
   });

@@ -8,6 +8,15 @@ plugins {
     id("com.android.application") version "8.5.2"
 }
 
+// Clave con la que el APK firma sus llamadas al servidor (ver Puente.firmar() en MainActivity.java
+// y _verificar_firma en Supabase). NUNCA se escribe en el repo: llega del secreto CMK_FIRMA_SECRETO
+// de GitHub (variable de entorno en el workflow) o, para compilar en tu computadora, de la
+// propiedad cmk.firma (p. ej. `gradle assembleDebug -Pcmk.firma=...`). Si no llega, queda vacía y
+// el APK no podrá hablar con el servidor (el workflow además aborta antes de compilar).
+val firmaSecreto: String = System.getenv("CMK_FIRMA_SECRETO")
+    ?: (project.findProperty("cmk.firma") as String?)
+    ?: ""
+
 android {
     // Identificador interno del código. Debe coincidir con el `package` de
     // MainActivity.java y con la carpeta src/main/java/com/prismalmesh/checkmyknowledge/.
@@ -22,8 +31,17 @@ android {
         targetSdk = 34
         // versionCode debe subir en cada versión que quieras que Android
         // reconozca como actualización; versionName es solo el texto visible.
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 2
+        versionName = "0.2"
+
+        // Expone la clave como BuildConfig.FIRMA_SECRETO (la lee MainActivity). Es hexadecimal,
+        // así que no necesita escapes dentro de las comillas.
+        buildConfigField("String", "FIRMA_SECRETO", "\"$firmaSecreto\"")
+    }
+
+    // AGP 8.x ya no genera BuildConfig por defecto: hay que pedirlo.
+    buildFeatures {
+        buildConfig = true
     }
 
     compileOptions {

@@ -15,9 +15,14 @@ plugins {
 // de GitHub (variable de entorno en el workflow) o, para compilar en tu computadora, de la
 // propiedad cmk.firma (p. ej. `gradle assembleDebug -Pcmk.firma=...`). Si no llega, queda vacía y
 // el APK no podrá hablar con el servidor (el workflow además aborta antes de compilar).
-val firmaSecreto: String = System.getenv("CMK_FIRMA_SECRETO")
+//
+// CAMBIO (2/oct/2026, 13): se aplica .trim(). Al pegar el secreto en GitHub se coló un salto de
+// línea al final; dentro del BuildConfig.java generado partía el string en dos líneas y javac
+// fallaba con "unclosed string literal". La clave es hexadecimal, así que recortar espacios y
+// saltos de línea nunca altera su valor real (y coincide con la de la tabla config de Supabase).
+val firmaSecreto: String = (System.getenv("CMK_FIRMA_SECRETO")
     ?: (project.findProperty("cmk.firma") as String?)
-    ?: ""
+    ?: "").trim()
 
 // Modo depuración del sensor (avisos Toast en MainActivity). POR DEFECTO ES false: antes era una
 // constante escrita a mano en MainActivity.java que había que acordarse de apagar, y como cada push
@@ -54,7 +59,7 @@ android {
         versionName = "0.3"
 
         // Expone la clave como BuildConfig.FIRMA_SECRETO (la lee MainActivity). Es hexadecimal,
-        // así que no necesita escapes dentro de las comillas.
+        // así que no necesita escapes dentro de las comillas (y ya viene sin saltos de línea).
         buildConfigField("String", "FIRMA_SECRETO", "\"$firmaSecreto\"")
         // Expone el modo depuración como BuildConfig.DEPURAR_SENSOR (la lee MainActivity).
         buildConfigField("boolean", "DEPURAR_SENSOR", depurarSensor.toString())

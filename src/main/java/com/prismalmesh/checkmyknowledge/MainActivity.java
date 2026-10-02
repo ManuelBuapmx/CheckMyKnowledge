@@ -25,6 +25,8 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 /**
+ * Propiedad intelectual de PRISMAL MESH. Todos los derechos reservados.
+ *
  * Única Activity de la app. Es un "cascarón" nativo que:
  *   1. Muestra en un WebView la app real del alumno (assets/index.html).
  *   2. Hace cumplir las reglas anti-trampa que HTML/JS no puede hacer solo:
@@ -67,6 +69,11 @@ import javax.crypto.spec.SecretKeySpec;
  * misma clave y rechaza llamadas sin firma válida, así el examen no se puede presentar sin esta
  * app. Además se desactiva la depuración remota del WebView: con ella, quien conecte el celular
  * a una computadora podría ejecutar JS dentro de la página y llamar a Android.firmar().
+ * CAMBIO (2/oct/2026, 5): DEPURAR_SENSOR ya no es una constante escrita a mano: viene de
+ * BuildConfig.DEPURAR_SENSOR, que es false salvo que se compile a propósito con depuración
+ * (workflow_dispatch con "depurar_sensor" o -Pcmk.depurar=true). Así el APK que sale de cada push
+ * a main nunca lleva los avisos. También se corrigió el comentario sobre iframes en el
+ * WebViewClient (no se puede asegurar que un iframe nunca pase por shouldOverrideUrlLoading).
  */
 public class MainActivity extends Activity {
 
@@ -114,9 +121,12 @@ public class MainActivity extends Activity {
     // lectura que llega, para diagnosticar por qué "no pasa nada" en un
     // equipo concreto. Un Toast no roba el foco de la ventana, así que NO
     // dispara onWindowFocusChanged ni anula el examen por sí mismo.
-    // IMPORTANTE: ponerlo en false antes de repartir el APK a los alumnos
-    // (los avisos les revelarían cómo funciona la defensa).
-    private static final boolean DEPURAR_SENSOR = true;
+    //
+    // YA NO SE EDITA AQUÍ: el valor lo decide la compilación (build.gradle.kts →
+    // BuildConfig.DEPURAR_SENSOR) y por defecto es false. Para un APK de diagnóstico:
+    // Actions > Compilar APK > Run workflow > marcar "depurar_sensor". Ese APK NO se reparte
+    // a los alumnos (los avisos les revelarían cómo funciona la defensa).
+    private static final boolean DEPURAR_SENSOR = BuildConfig.DEPURAR_SENSOR;
 
     /** Toast reutilizable: se cancela el anterior para que no se acumulen en cola. */
     private Toast toastDepuracion;
@@ -265,8 +275,11 @@ public class MainActivity extends Activity {
         webView.setOnLongClickListener(v -> true);
 
         // El alumno no puede navegar a ningún otro sitio desde la app.
-        // OJO: esto NO afecta al iframe de YouTube que index.html embebe como
-        // contexto de una pregunta: un iframe no pasa por este método.
+        // OJO: NO se puede asegurar que esto cubra al iframe de YouTube. La carga inicial del
+        // iframe (su src) no suele pasar por aquí, pero una navegación iniciada por el usuario
+        // dentro del iframe sí puede pasar, y aquí se bloquea. Por eso index.html además pide al
+        // reproductor ocultar el botón de pantalla completa y los enlaces (ver crearReproductor()):
+        // la regla 6 del README (los links externos anulan el examen) no depende solo de este método.
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {

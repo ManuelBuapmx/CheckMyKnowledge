@@ -30,6 +30,20 @@ jobs:
       # condición de carrera no puede volver a pasar.
       # => NO volver a agregar pasos que escriban/commiteen archivos del repo.
 
+      # CAMBIO (2/oct/2026): el APK firma sus llamadas al servidor con una clave que NO está en el
+      # repo: vive en el secreto de GitHub CMK_FIRMA_SECRETO (Settings > Secrets and variables >
+      # Actions) y es la misma que la fila 'firma_secreto' de la tabla config de Supabase.
+      # Este paso aborta la compilación si falta, para no repartir un APK que no pueda calificar.
+      # El valor llega por variable de entorno y no se imprime (GitHub lo enmascara en los logs).
+      - name: Verificar secreto de firma
+        env:
+          CMK_FIRMA_SECRETO: ${{ secrets.CMK_FIRMA_SECRETO }}
+        run: |
+          if [ -z "$CMK_FIRMA_SECRETO" ]; then
+            echo "::error::Falta el secreto CMK_FIRMA_SECRETO en GitHub (ver README, 'Firma de la app')."
+            exit 1
+          fi
+
       # Java 17: requerido por el plugin de Android 8.x (ver build.gradle.kts).
       - uses: actions/setup-java@v4
         with:
@@ -43,7 +57,10 @@ jobs:
           gradle-version: "8.9"
 
       # --no-daemon: en un runner efímero no sirve dejar el daemon vivo.
+      # build.gradle.kts lee CMK_FIRMA_SECRETO del entorno y lo mete en BuildConfig.
       - run: gradle assembleDebug --no-daemon
+        env:
+          CMK_FIRMA_SECRETO: ${{ secrets.CMK_FIRMA_SECRETO }}
 
       # Publica el APK para descargarlo desde la página del run.
       # Si cambias la estructura del proyecto, revisa que esta ruta siga existiendo.

@@ -8,6 +8,12 @@
   o reinicia la app puede volver a entrar con su matrícula, pero el reloj NO se detiene: el
   servidor devuelve los segundos que le quedan. El intento termina al entregar o al acabarse
   el tiempo. Ya no existe buscarAlumno(); la validación de matrícula la hace iniciar_intento.
+
+  CAMBIO (2/oct/2026, 9): FIRMA DE LA APP. Cada llamada al servidor (iniciar_intento,
+  obtener_preguntas, calificar_examen) lleva una firma HMAC que solo el APK sabe generar
+  (Android.firmar, ver MainActivity.java). Así el examen no se puede presentar desde un
+  navegador o script usando solo la clave pública. Las preguntas ya NO se leen por REST:
+  se piden con la RPC obtener_preguntas, que exige intento en curso y firma válida.
 -->
 <html lang="es">
 <head>
@@ -83,6 +89,24 @@
 var SUPABASE_URL = "https://juvqvshcfsrtscvzluaa.supabase.co";
 var SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp1dnF2c2hjZnNydHNjdnpsdWFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAzMDY4NjQsImV4cCI6MjEwNTg4Mjg2NH0.aL2bzJbTJ6DfzUlh8UaSBZ5Fah3Bae1tNBDi7R6BD68";
 
+// ---- Firma de la app ----
+// Pide al APK (Android.firmar) que firme la llamada: devuelve { ts, firma }, donde ts son los
+// segundos Unix del celular y firma es HMAC-SHA256(clave de la app, accion|matricula|materia|ts).
+// La clave NO está en este HTML: vive compilada en el APK y en el servidor, y el servidor
+// rechaza cualquier llamada sin firma válida. Fuera del APK (navegador, script) no existe
+// Android.firmar, así que se manda sin firma y el servidor la rechaza.
+// Se firma en CADA llamada (incluidos los reintentos) para que el ts sea reciente.
+function firmar(accion, matricula, materia) {
+  try {
+    if (window.Android && Android.firmar) {
+      var r = String(Android.firmar(accion, String(matricula), String(materia)) || "");
+      var i = r.indexOf(":");
+      if (i > 0) return { ts: Number(r.slice(0, i)), firma: r.slice(i + 1) };
+    }
+  } catch (e) {}
+  return { ts: null, firma: null };
+}
+
 // ---- Intento único (en el servidor) ----
 // La lista de alumnos vive en la tabla "alumnos" de Supabase y el rol anon NO
 // puede leerla. Solo puede llamar a funciones RPC. iniciar_intento hace TRES cosas:
@@ -100,6 +124,7 @@ var SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYm
 function iniciarIntento(matricula, materia) {
   var m = String(matricula || "").replace(/\s+/g, "");
   if (!m) return Promise.resolve({ estado: "noregistrada" });
+  var f = firmar("iniciar", m, materia);
   return fetch(SUPABASE_URL + "/rest/v1/rpc/iniciar_intento", {
     method: "POST",
     headers: {
@@ -107,7 +132,7 @@ function iniciarIntento(matricula, materia) {
       Authorization: "Bearer " + SUPABASE_ANON_KEY,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({ p_matricula: m, p_materia_id: materia })
+    body: JSON.stringify({ p_matricula: m, p_materia_id: materia, p_ts: f.ts, p_firma: f.firma })
   }).then(function (resp) {
     if (resp.ok) return resp.json();
     return resp.text().then(function (t) {
@@ -132,19 +157,24 @@ function cargarMaterias() {
   });
 }
 
-function cargarPreguntas(materiaId) {
-  // Ya NO se pide la respuesta correcta aquí — el servidor no la entrega a este
-  // rol (anon). La calificación se hace del lado seguro, ver calificarExamen().
-  // "seccion" es la etiqueta opcional de agrupación (ver comentario de
-  // .seccion-label arriba).
-  var url = SUPABASE_URL + "/rest/v1/preguntas?select=texto,opciones,contexto,seccion&activa=eq.true&materia_id=eq." + materiaId + "&order=orden.asc";
-  return fetch(url, {
+function cargarPreguntas(materiaId, matricula) {
+  // Las preguntas ya NO se leen por REST (cualquiera podía bajarlas sin matrícula): se piden a la
+  // RPC obtener_preguntas, que exige un intento en curso y una firma válida de la app.
+  // Nunca entrega la respuesta correcta — la calificación se hace del lado seguro, ver
+  // calificarExamen(). "seccion" es la etiqueta opcional de agrupación (ver .seccion-label).
+  var f = firmar("preguntas", matricula, materiaId);
+  return fetch(SUPABASE_URL + "/rest/v1/rpc/obtener_preguntas", {
+    method: "POST",
     headers: {
       apikey: SUPABASE_ANON_KEY,
-      Authorization: "Bearer " + SUPABASE_ANON_KEY
-    }
+      Authorization: "Bearer " + SUPABASE_ANON_KEY,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ p_matricula: matricula, p_materia_id: materiaId, p_ts: f.ts, p_firma: f.firma })
   }).then(function (resp) {
-    if (!resp.ok) throw new Error("No se pudieron cargar las preguntas");
+    // Se conserva el texto del error del servidor (p. ej. "Reloj desajustado") para que
+    // inicio() pueda explicarle al alumno qué pasó.
+    if (!resp.ok) return resp.text().then(function (t) { throw new Error(t || "No se pudieron cargar las preguntas"); });
     return resp.json();
   }).then(function (filas) {
     return filas.map(function (f) { return { t: f.texto, o: f.opciones, x: f.contexto || null, s: f.seccion || null }; });
@@ -158,6 +188,7 @@ function cargarPreguntas(materiaId) {
 // y dentro de tiempo, y lo cierra al calificar: no hay segunda calificación posible.
 function calificarExamen(materiaId, matricula, respuestas) {
   var url = SUPABASE_URL + "/rest/v1/rpc/calificar_examen";
+  var f = firmar("calificar", matricula, materiaId);
   return fetch(url, {
     method: "POST",
     headers: {
@@ -165,7 +196,7 @@ function calificarExamen(materiaId, matricula, respuestas) {
       Authorization: "Bearer " + SUPABASE_ANON_KEY,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({ p_materia_id: materiaId, p_matricula: matricula, p_respuestas: respuestas })
+    body: JSON.stringify({ p_materia_id: materiaId, p_matricula: matricula, p_respuestas: respuestas, p_ts: f.ts, p_firma: f.firma })
   }).then(function (resp) {
     if (!resp.ok) return resp.text().then(function (t) { throw new Error(t || "No se pudo calificar el examen"); });
     return resp.json();
@@ -392,7 +423,7 @@ function inicio() {
       alumno = { matricula: r.matricula, nombre: r.nombre, grupo: r.grupo };
       restanteSeg = r.restante_seg;
       b.textContent = "Cargando preguntas...";
-      return cargarPreguntas(materiaId);
+      return cargarPreguntas(materiaId, alumno.matricula);
     }).then(function (preguntas) {
       if (!preguntas.length) throw new Error("No hay preguntas activas");
       PREGUNTAS = preguntas;
@@ -418,6 +449,10 @@ function inicio() {
         ? "Ya presentaste este examen. Si crees que es un error, avisa a tu profesor."
         : e && e.intento === "agotado"
         ? "Tu tiempo terminó mientras la app estaba cerrada y el examen se registró sin respuestas. Avisa a tu profesor."
+        : e && /Reloj desajustado/.test(e.message)
+        ? "La hora de tu celular no es correcta. Actívala en automático (Ajustes > Fecha y hora) e inténtalo de nuevo."
+        : e && /Firma/.test(e.message)
+        ? "Esta versión de la app no está autorizada. Instala la versión más reciente que te dio tu profesor."
         : "No se pudo continuar. Revisa tu conexión e inténtalo de nuevo.";
       b.disabled = false;
       b.textContent = "Comenzar examen";
@@ -553,11 +588,15 @@ function intentarCalificar() {
     // Errores DEFINITIVOS del servidor (tiempo vencido, intento ya cerrado): reintentar no
     // sirve de nada, así que se ofrece salir en vez de "Reintentar". Cualquier otro error
     // se trata como fallo de red y se puede reintentar (las respuestas siguen en memoria).
-    var definitivo = !!(e && /Tiempo agotado|Intento ya utilizado|No hay un intento/.test(e.message));
+    // "Firma" (app no autorizada) también es definitivo: reintentar no lo arregla.
+    // "Reloj desajustado" NO lo es: el alumno puede corregir la hora y reintentar.
+    var definitivo = !!(e && /Tiempo agotado|Intento ya utilizado|No hay un intento|Firma/.test(e.message));
     var c = el("div", "", "card");
     c.appendChild(el("h1", "No se pudo calificar"));
     c.appendChild(el("p", definitivo
-      ? "Tu tiempo ya terminó o el intento se cerró. Avisa a tu profesor."
+      ? "Tu tiempo ya terminó, el intento se cerró o esta versión de la app no está autorizada. Avisa a tu profesor."
+      : e && /Reloj desajustado/.test(e.message)
+      ? "La hora de tu celular no es correcta. Actívala en automático (Ajustes > Fecha y hora) y toca Reintentar. Tus respuestas no se han perdido."
       : "Revisa tu conexión e inténtalo de nuevo. Tus respuestas no se han perdido.", "aviso"));
     var b = el("button", definitivo ? "Salir" : "Reintentar");
     b.onclick = definitivo ? function () { if (window.Android) Android.salir(); else elegirMateria(); } : intentarCalificar;

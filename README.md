@@ -14,14 +14,26 @@ El profesor administra materias, secciones y preguntas, y ve resultados desde un
 | `build.gradle.kts`, `settings.gradle.kts` | Compilación Gradle. |
 | `.github/workflows/build.yml` | Compila el APK en GitHub Actions. |
 
-Backend: Supabase (tablas `materias`, `preguntas`, `resultados`; función RPC `calificar_examen`).
+Backend: Supabase (tablas `materias`, `preguntas`, `resultados`, `alumnos`; funciones RPC `validar_matricula` y `calificar_examen`).
+
+## Acceso del alumno (`index.html` + Supabase)
+
+- **Solo con matrícula.** El alumno escribe su matrícula; la app llama a la función `validar_matricula` de Supabase. Si existe y está activa, entra; si no, ve "Matrícula no registrada" (sin pistas de matrículas parecidas).
+- **Encabezado del examen:** barra fija arriba con el reloj y, debajo, `nombre · matrícula · Grupo`, tal como los devuelve el servidor.
+- **La validación es del lado del servidor.** Tabla `alumnos(matricula PK, nombre, grupo, activo, creado_en)` con RLS: el rol `anon` no puede leerla ni escribirla (privilegios revocados), solo el admin desde el panel. La lista completa nunca viaja a la app.
+- **Funciones RPC:**
+  - `validar_matricula(p_matricula)` → `{matricula, nombre, grupo}` o error `Matrícula no registrada`.
+  - `calificar_examen(p_materia_id, p_matricula, p_respuestas)` → valida la matrícula OTRA VEZ, toma nombre y grupo de la tabla y guarda el resultado. **Ya no acepta un nombre libre** (la versión anterior `calificar_examen(bigint, text-nombre, jsonb)` se eliminó para que no sirva de puerta trasera: un APK anterior ya no puede calificar).
+- **Resultados:** `resultados` tiene columnas nuevas `matricula` y `grupo`; `nombre` guarda solo el nombre.
+- **Alumnos:** por ahora se administran desde el Table Editor de Supabase (se puede importar un CSV con columnas `matricula,nombre,grupo`). `activo = false` impide entrar sin borrar historial. Alumno de prueba cargado: `1234567 · Robles González José Manuel · 10A`.
+- **Límite conocido:** al ser acceso solo por matrícula, quien conozca la matrícula de un compañero puede entrar como él, y puede probar matrículas (suelen ser predecibles). No hay otro factor. Si hace falta, añadir un solo intento por matrícula/materia o un PIN por alumno.
 
 ## Cómo ve el examen el alumno (`index.html`)
 
 - **Una sección por pantalla, con todas sus preguntas juntas.** Las preguntas se agrupan por el texto de `preguntas.seccion`: cada vez que cambia respecto a la pregunta anterior (en orden) empieza una sección nueva. Las preguntas seguidas sin sección forman un solo grupo sin título. Botones **← Sección anterior** / **Siguiente sección →**; el alumno puede volver a corregir respuestas.
 - **El contexto (video/texto) se muestra una sola vez** cuando varias preguntas seguidas de la misma sección lo comparten; reaparece si cambia. (Antes se repetía en cada pregunta porque había una por pantalla.)
 - **Temporizador de 1 hora** (`DURACION_MIN = 60` al inicio del `<script>`). Barra fija arriba con la cuenta regresiva; se pone roja en los últimos 5 min. Se calcula con una hora de fin (`Date.now()`), no restando 1 por tick. Al llegar a 0 el examen **se entrega solo** con lo contestado.
-- **Preguntas sin responder** se envían como `-1` en `p_respuestas` (nunca `null`), así el arreglo siempre lleva un número por pregunta y `-1` cuenta como mala. ⚠ Verifica que `calificar_examen` no falle con `-1` (si compara `respuesta = correcta` no hay problema).
+- **Preguntas sin responder** se envían como `-1` en `p_respuestas` (nunca `null`), así el arreglo siempre lleva un número por pregunta y `-1` cuenta como mala (verificado: `calificar_examen` solo compara `respuesta = correcta`).
 - En la última sección, si faltan respuestas se avisa una vez y el segundo toque en **Terminar de todos modos** entrega. No se usa `confirm()`: en el WebView no funciona y robaría el foco (anularía el examen).
 - El reloj corre solo en el cliente: si el alumno cierra la app, el examen se anula y empieza de cero con reloj nuevo (misma regla de siempre).
 
@@ -108,6 +120,7 @@ El panel cuenta las filas afectadas por cada operación; si la base no deja modi
 9. La clave `anon` de Supabase en `index.html` y `admin.html` es pública por diseño; la seguridad real está en las políticas RLS.
 10. **`DEPURAR_SENSOR` debe estar en `false`** en cualquier APK que se reparta a alumnos.
 11. **No usar `alert()`/`confirm()`/`prompt()` en `index.html`**: abren un diálogo nativo que roba el foco y anula el examen. Usar mensajes dentro de la página.
+12. **La lista de alumnos nunca va en el cliente.** Vive en la tabla `alumnos` (RLS cerrada para `anon`); la app solo usa `validar_matricula` y `calificar_examen`. No dar permisos de lectura a `anon` sobre `alumnos`.
 
 ## Compilar
 
@@ -115,6 +128,7 @@ Push a `main` (o "Run workflow" en la pestaña Actions). El APK queda como artif
 
 ## Historial de cambios
 
+- **2/oct/2026 (5)** — Acceso por **matrícula** validada en Supabase: tabla `alumnos` (RLS cerrada), funciones `validar_matricula` y `calificar_examen` nueva (recibe matrícula, reemplaza a la anterior), columnas `matricula` y `grupo` en `resultados`. `index.html` muestra nombre, matrícula y grupo en el encabezado fijo del examen.
 - **2/oct/2026 (4)** — `index.html`: cada sección se muestra completa en una sola pantalla (todas sus preguntas), con navegación entre secciones; contexto mostrado una vez por bloque; temporizador de 60 min (`DURACION_MIN`) con entrega automática; preguntas sin responder se mandan como `-1`.
 - **2/oct/2026 (3)** — `MainActivity`: `index.html` se carga con origen https (`ORIGEN_BASE`) y DOM storage activo, para corregir el error de configuración del reproductor de YouTube.
 - **2/oct/2026 (2)** — Importador: corregido `Logger is not defined`; solo ejecuta funciones sin parámetros (antes truena con `addQuestion(...)`); soporta `addPageBreakItem` como sección y links de YouTube dentro de `setHelpText`.

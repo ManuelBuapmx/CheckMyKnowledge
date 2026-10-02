@@ -34,12 +34,15 @@
      se cambia de sección (pantalla() solo reemplaza el contenido de #app). */
   #reloj {
     position: fixed; top: 0; left: 0; right: 0; z-index: 10; text-align: center;
-    padding: 8px; font-size: 18px; font-weight: 700; background: #1565c0; color: #fff;
+    padding: 6px 8px; background: #1565c0; color: #fff;
     font-variant-numeric: tabular-nums;
   }
+  #reloj .reloj-tiempo { font-size: 18px; font-weight: 700; }
+  /* Encabezado del examen: nombre, matrícula y grupo del alumno que accedió. */
+  #reloj .reloj-alumno { font-size: 12px; font-weight: 400; margin-top: 2px; }
   /* Últimos 5 minutos: se pone rojo para avisar al alumno. */
   #reloj.poco { background: #b71c1c; }
-  body.con-reloj { padding-top: 56px; }
+  body.con-reloj { padding-top: 76px; }
   /* --- Contexto por pregunta (video embebido o texto de apoyo/lectura) ---
      El video SIEMPRE va embebido (iframe), nunca como link externo: un link
      que abra YouTube fuera de la app cancelaría el examen (ver anularExamen()
@@ -69,6 +72,32 @@
 // (aquí: leer solo preguntas activas, e insertar resultados, nada más).
 var SUPABASE_URL = "https://juvqvshcfsrtscvzluaa.supabase.co";
 var SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp1dnF2c2hjZnNydHNjdnpsdWFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAzMDY4NjQsImV4cCI6MjEwNTg4Mjg2NH0.aL2bzJbTJ6DfzUlh8UaSBZ5Fah3Bae1tNBDi7R6BD68";
+
+// ---- Validación de matrícula (en el servidor) ----
+// La lista de alumnos vive en la tabla "alumnos" de Supabase y el rol anon NO
+// puede leerla. Solo puede llamar a validar_matricula, que devuelve nombre y
+// grupo de UNA matrícula exacta (o error si no existe / está desactivada).
+// Regresa una promesa con { matricula, nombre, grupo } o null si no está registrada.
+function buscarAlumno(matricula) {
+  var m = String(matricula || "").replace(/\s+/g, "");
+  if (!m) return Promise.resolve(null);
+  return fetch(SUPABASE_URL + "/rest/v1/rpc/validar_matricula", {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: "Bearer " + SUPABASE_ANON_KEY,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ p_matricula: m })
+  }).then(function (resp) {
+    if (resp.ok) return resp.json();
+    return resp.text().then(function (t) {
+      // La función lanza 'Matrícula no registrada' → es un rechazo normal, no un fallo de red.
+      if (t.indexOf("Matrícula no registrada") !== -1) return null;
+      throw new Error(t || "No se pudo validar la matrícula");
+    });
+  });
+}
 
 // Duración total del examen, en minutos. Cámbiala aquí si hace falta.
 var DURACION_MIN = 60;
@@ -105,7 +134,7 @@ function cargarPreguntas(materiaId) {
 // La calificación se calcula en el servidor (función calificar_examen), que es
 // la única que puede leer cuál era la opción correcta. El cliente nunca la ve,
 // ni antes ni después: solo recibe el resultado ya calculado.
-function calificarExamen(materiaId, nombreAlumno, respuestas) {
+function calificarExamen(materiaId, matricula, respuestas) {
   var url = SUPABASE_URL + "/rest/v1/rpc/calificar_examen";
   return fetch(url, {
     method: "POST",
@@ -114,7 +143,7 @@ function calificarExamen(materiaId, nombreAlumno, respuestas) {
       Authorization: "Bearer " + SUPABASE_ANON_KEY,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({ p_materia_id: materiaId, p_nombre: nombreAlumno, p_respuestas: respuestas })
+    body: JSON.stringify({ p_materia_id: materiaId, p_matricula: matricula, p_respuestas: respuestas })
   }).then(function (resp) {
     if (!resp.ok) return resp.text().then(function (t) { throw new Error(t || "No se pudo calificar el examen"); });
     return resp.json();
@@ -195,7 +224,9 @@ var PREGUNTAS = [];
 var SECCIONES = [];      // grupos de preguntas consecutivas con la misma sección (ver agruparSecciones)
 var secIdx = 0;          // sección que se está mostrando
 var app = document.getElementById("app");
-var nombre = "", resp = [];
+var alumno = null;       // { matricula, nombre, grupo } del alumno que accedió
+var matriculaEscrita = ""; // lo último que escribió en el campo (por si vuelve atrás)
+var resp = [];
 var avisoFaltantes = false; // true tras avisar de preguntas sin responder (el 2.º toque ya termina)
 
 // ---- Reloj ----
@@ -231,11 +262,15 @@ function iniciarReloj() {
     barra.id = "reloj";
     document.body.appendChild(barra);
   }
+  barra.innerHTML = "";
+  var lineaTiempo = el("div", "", "reloj-tiempo");
+  barra.appendChild(lineaTiempo);
+  barra.appendChild(el("div", alumno.nombre + " · " + alumno.matricula + " · Grupo " + alumno.grupo, "reloj-alumno"));
   document.body.classList.add("con-reloj");
   relojFin = Date.now() + DURACION_MIN * 60 * 1000;
   function tick() {
     var restante = relojFin - Date.now();
-    barra.textContent = "⏱ " + formatoTiempo(restante);
+    lineaTiempo.textContent = "⏱ " + formatoTiempo(restante);
     barra.className = restante <= 5 * 60 * 1000 ? "poco" : "";
     if (restante <= 0) fin(true); // se acabó el tiempo: se entrega lo que haya
   }
@@ -300,11 +335,12 @@ function agruparSecciones(preguntas) {
 function inicio() {
   var c = el("div", "", "card");
   c.appendChild(el("h1", "CheckMyKnowledge"));
-  c.appendChild(el("p", "Escribe tu nombre completo:"));
+  c.appendChild(el("p", "Escribe tu matrícula:"));
   var inp = el("input");
   inp.type = "text";
+  inp.setAttribute("inputmode", "numeric");
   inp.setAttribute("autocomplete", "off");
-  inp.value = nombre;
+  inp.value = matriculaEscrita;
   c.appendChild(inp);
   c.appendChild(el("p", "Tendrás " + DURACION_MIN + " minutos para contestar. Al terminar el tiempo, el examen se entrega solo con lo que lleves.", "aviso"));
   c.appendChild(el("p", "Al comenzar no podrás salir, minimizar, cambiar de pantalla ni tomar capturas. Si lo haces, el examen se cierra y deberás empezar de nuevo.", "aviso"));
@@ -312,13 +348,22 @@ function inicio() {
   c.appendChild(msg);
   var b = el("button", "Comenzar examen");
   b.onclick = function () {
-    if (inp.value.trim().length < 3) { msg.textContent = "Escribe tu nombre."; return; }
-    nombre = inp.value.trim();
+    matriculaEscrita = inp.value.trim();
+    if (!matriculaEscrita) { msg.textContent = "Escribe tu matrícula."; return; }
     inp.blur();
     b.disabled = true;
-    b.textContent = "Cargando preguntas...";
+    b.textContent = "Verificando...";
     msg.textContent = "";
-    cargarPreguntas(materiaId).then(function (preguntas) {
+    // Primero se valida la matrícula en el servidor; solo si existe se piden las preguntas.
+    // El mensaje de rechazo no da pistas de matrículas parecidas.
+    buscarAlumno(matriculaEscrita).then(function (encontrado) {
+      if (!encontrado) {
+        var e = new Error("no-registrada"); e.noRegistrada = true; throw e;
+      }
+      alumno = encontrado;
+      b.textContent = "Cargando preguntas...";
+      return cargarPreguntas(materiaId);
+    }).then(function (preguntas) {
       if (!preguntas.length) throw new Error("No hay preguntas activas");
       PREGUNTAS = preguntas;
       SECCIONES = agruparSecciones(preguntas);
@@ -334,8 +379,10 @@ function inicio() {
         iniciarReloj();
         pantallaSeccion();
       }, 300);
-    }).catch(function () {
-      msg.textContent = "No se pudieron cargar las preguntas. Revisa tu conexión e inténtalo de nuevo.";
+    }).catch(function (e) {
+      msg.textContent = e && e.noRegistrada
+        ? "Matrícula no registrada. Revísala o avisa a tu profesor."
+        : "No se pudo continuar. Revisa tu conexión e inténtalo de nuevo.";
       b.disabled = false;
       b.textContent = "Comenzar examen";
     });
@@ -458,10 +505,10 @@ function fin(porTiempo) {
 }
 
 function intentarCalificar() {
-  calificarExamen(materiaId, nombre, resp).then(function (resultado) {
+  calificarExamen(materiaId, alumno.matricula, resp).then(function (resultado) {
     var c = el("div", "", "card");
     c.appendChild(el("h1", "Examen terminado"));
-    c.appendChild(el("p", nombre + ": " + resultado.correctas + " de " + resultado.total + " correctas"));
+    c.appendChild(el("p", alumno.nombre + ": " + resultado.correctas + " de " + resultado.total + " correctas"));
     var b = el("button", "Salir");
     b.onclick = function () { if (window.Android) Android.salir(); else elegirMateria(); };
     c.appendChild(b);

@@ -3,7 +3,7 @@
 **Propiedad intelectual exclusiva de PRISMAL MESH.** Todos los derechos reservados. Marca: `PRISMAL MESH` (dos palabras, mayúsculas, separadas por un espacio).
 
 App Android de exámenes de opción múltiple para alumnos, con reglas anti-trampa.
-El profesor administra materias, secciones y preguntas, y ve resultados desde un panel web (`admin.html`).
+El profesor administra materias, secciones y preguntas, y ve resultados desde un panel web (`admin.html`, repo aparte **CMKAdmin**).
 
 ## Cómo está armado
 
@@ -11,7 +11,7 @@ El profesor administra materias, secciones y preguntas, y ve resultados desde un
 |---|---|
 | `src/main/java/.../MainActivity.java` | Cascarón nativo: abre un WebView con la app y hace cumplir las reglas anti-trampa. |
 | `src/main/assets/index.html` | La app del alumno (HTML + JS puro, sin librerías). Habla con Supabase. |
-| `admin.html` | Panel del profesor (login, preguntas, secciones, materias, importar examen por script, resultados). Se abre en un navegador; no va dentro del APK. |
+| `admin.html` | **Ya no está en este repo:** vive en `ManuelBuapmx/CMKAdmin` (login, preguntas, alumnos, importar examen por script, resultados). Se abre en un navegador; no va dentro del APK. Ver el README de ese repo. |
 | `src/main/AndroidManifest.xml` | Permisos y bloqueo de orientación / multiventana. |
 | `build.gradle.kts`, `settings.gradle.kts` | Compilación Gradle. |
 | `.github/workflows/build.yml` | Compila el APK en GitHub Actions. |
@@ -27,7 +27,7 @@ Backend: Supabase (tablas `materias`, `preguntas`, `resultados`, `alumnos`; func
   - `validar_matricula(p_matricula)` → `{matricula, nombre, grupo}` o error `Matrícula no registrada`.
   - `calificar_examen(p_materia_id, p_matricula, p_respuestas)` → valida la matrícula OTRA VEZ, toma nombre y grupo de la tabla y guarda el resultado. **Ya no acepta un nombre libre** (la versión anterior `calificar_examen(bigint, text-nombre, jsonb)` se eliminó para que no sirva de puerta trasera: un APK anterior ya no puede calificar).
 - **Resultados:** `resultados` tiene columnas nuevas `matricula` y `grupo`; `nombre` guarda solo el nombre.
-- **Alumnos:** por ahora se administran desde el Table Editor de Supabase (se puede importar un CSV con columnas `matricula,nombre,grupo`). `activo = false` impide entrar sin borrar historial. Alumno de prueba cargado: `1234567 · Robles González José Manuel · 10A`.
+- **Alumnos:** se administran desde la pestaña **Alumnos** del panel (CMKAdmin): alta, edición, activar/desactivar, borrar e importación por CSV con columnas `matricula,nombre,grupo`. También se pueden editar en el Table Editor de Supabase. `activo = false` impide entrar sin borrar historial. Alumno de prueba cargado: `123456 · ROBLES GONZÁLEZ JOSÉ MANUEL · 10B`.
 - **Límite conocido:** al ser acceso solo por matrícula, quien conozca la matrícula de un compañero puede entrar como él, y puede probar matrículas (suelen ser predecibles). No hay otro factor. Si hace falta, añadir un solo intento por matrícula/materia o un PIN por alumno.
 
 ## Cómo ve el examen el alumno (`index.html`)
@@ -69,45 +69,26 @@ Con `DEPURAR_SENSOR = true` en `MainActivity.java` la app muestra avisos (Toast)
 
 **⚠ Antes de repartir el APK a los alumnos, poner `DEPURAR_SENSOR = false`.**
 
-## Panel del profesor (`admin.html`)
+## Panel del profesor (repo CMKAdmin)
 
-Pestañas: **Preguntas · Secciones · Materias · Importar · Resultados**.
+El panel vive en su propio repo, `ManuelBuapmx/CMKAdmin`, y su README es la referencia de qué hace. Pestañas actuales: **Preguntas · Alumnos · Importar · Resultados**.
 
-### Preguntas
-- Filtros por materia y por sección (incluye "(Sin sección)").
-- Casilla por pregunta y "seleccionar todas las visibles". Con las marcadas: **Asignar sección**, **Quitar sección** (no borra preguntas) y **Borrar seleccionadas**.
-- **Borrar todas las visibles**: borra lo que muestre el filtro actual (sin filtros = todo). Pide escribir `BORRAR`.
-- Cada pregunta muestra etiquetas de sección y de contexto (▶ Video / 📄 Texto de apoyo).
+- **Preguntas:** alta, edición y borrado con materia, sección y contexto; filtro por materia.
+- **Alumnos:** lista con búsqueda y filtro por grupo, alta/edición, activar/desactivar, borrar e importación CSV.
+- **Importar:** script estilo Apps Script de Forms (`FormApp.create`, `addMultipleChoiceItem`, `createChoice`...). El título de cada `FormApp.create` es la sección de sus preguntas.
+- **Resultados:** alumno, matrícula, grupo, materia, puntaje y fecha.
 
-### Secciones
-Las secciones **no son una tabla**: son un texto libre en `preguntas.seccion` (así lo usa `index.html`). Por eso:
-- *Agregar* = poner ese texto a un grupo de preguntas, por rango de `#` de orden ("de la 11 a la 20 es Listening") o con las casillas de Preguntas.
-- *Renombrar* cambia el texto en todas sus preguntas. *Quitar sección* vacía el texto (las preguntas se conservan). *Borrar preguntas* elimina la sección con sus preguntas.
-- ⚠ Como el alumno ve **una sección por pantalla**, las preguntas de una sección deben tener `orden` consecutivo; si se intercalan con otra sección, se partirán en varias pantallas.
+**Pendiente (descrito en versiones anteriores de este README, pero NO incluido en el panel actual):** pestañas Secciones y Materias, selección y borrado masivo de preguntas, asignar/quitar sección, soporte de `addSectionHeaderItem`/`addVideoItem`/`addPageBreakItem`/`Logger` en el importador, solo ejecutar funciones sin parámetros y detección de operaciones bloqueadas por RLS en preguntas/materias/resultados.
 
-### Materias
-Crear, editar (nombre/orden), **Activar/Desactivar** (oculta a los alumnos sin borrar nada) y **Borrar**. Borrar una materia elimina sus preguntas y, con confirmación aparte, sus resultados. Si solo quieres ocultarla, desactívala.
+Las secciones siguen siendo texto libre en `preguntas.seccion`. Como el alumno ve **una sección por pantalla**, las preguntas de una sección deben tener `orden` consecutivo; si se intercalan con otra sección, se partirán en varias pantallas.
 
-### Importar por script (Apps Script de Forms)
-Además de `FormApp.create`, `addMultipleChoiceItem`, `setTitle`, `createChoice`, `setChoices`:
+## Videos de YouTube dentro de la app
 
-| Llamada | Efecto |
-|---|---|
-| `FormApp.create('Título')` | El título es la **sección** de sus preguntas |
-| `exam.addSectionHeaderItem().setTitle('Listening')` | Cambia la **sección** de las preguntas siguientes y reinicia el contexto |
-| `...setHelpText('texto')` (en el encabezado) | Ese texto es el **contexto** de las preguntas siguientes (p. ej. pasaje de lectura) |
-| `exam.addVideoItem().setVideoUrl('link YouTube')` | Las preguntas siguientes llevan ese **video** (se guarda en cada una; el alumno lo ve una vez por bloque) hasta otro video o encabezado |
-| `item.setContext('link o texto')` / `item.setVideoUrl(...)` | Contexto solo para esa pregunta |
-| `exam.addPageBreakItem().setTitle('SECTION 1')` | Inicia una **sección** (título de la página); un encabezado posterior se agrega: `SECTION 1 · Part A` |
-| Link de YouTube dentro de un `setHelpText('... Click to play: URL')` | Se detecta y se guarda solo el video (la app muestra solo el video si hay link) |
+Una página `file://` no tiene origen válido y YouTube responde "error de configuración del reproductor" (153). Por eso `MainActivity` carga `index.html` con `loadDataWithBaseURL(origenBase(), ...)` (origen `https://<package de la app>`) y activa DOM storage. El origen debe identificar a **nuestra app**, no a YouTube (con `https://www.youtube.com` el reproductor respondía error 152-4). Si el error persiste, lo único que hay que tocar es la función `origenBase()` (p. ej. devolver `https://localhost/`). Un video con embebido deshabilitado por su dueño tampoco carga: probar con otro.
 
-Las funciones auxiliares con parámetros (p. ej. `addQuestion(exam, ...)`) no se ejecutan solas: solo las funciones sin parámetros; `Logger.log` y `exam.getEditUrl()` se aceptan y se ignoran. Los links de YouTube (watch, youtu.be, embed, shorts, live) se guardan siempre como `https://www.youtube.com/watch?v=ID`, que es el formato que reconoce `index.html`. Un link que **no** sea de YouTube se marca como error (los links externos rompen el examen).
+## Permisos (RLS)
 
-### Videos de YouTube dentro de la app
-Una página `file://` no tiene origen válido y YouTube responde "error de configuración del reproductor". Por eso `MainActivity` carga `index.html` con `loadDataWithBaseURL(ORIGEN_BASE, ...)` (origen `https`) y activa DOM storage. Si el error persiste, cambiar solo la constante `ORIGEN_BASE`. Un video con embebido deshabilitado por su dueño tampoco carga: probar con otro.
-
-### Permisos (RLS)
-El panel cuenta las filas afectadas por cada operación; si la base no deja modificar, avisa en lugar de fingir éxito. Para crear/editar/borrar **materias** hace falta una política RLS que permita al admin escribir en `materias` (igual que la que ya existe para `preguntas`).
+Las políticas de admin sobre `preguntas`, `materias`, `resultados` y `alumnos` están limitadas al correo del profesor (no a cualquier usuario autenticado); `anon` solo lee preguntas y materias activas e inserta resultados vía RPC. El panel debe avisar cuando la base no aplica un cambio; hoy lo hace solo en `alumnos` (ver "Pendiente" arriba).
 
 ## Reglas para quien modifique el código (persona o IA)
 
@@ -127,10 +108,11 @@ El panel cuenta las filas afectadas por cada operación; si la base no deja modi
 
 ## Compilar
 
-Push a `main` (o "Run workflow" en la pestaña Actions). El APK queda como artifact `checkmyknowledge-apk`. `admin.html` no se compila: se sube/abre aparte.
+Push a `main` (o "Run workflow" en la pestaña Actions). El APK queda como artifact `checkmyknowledge-apk`. `admin.html` ya no vive aquí (repo CMKAdmin); no se compila: se abre aparte en un navegador.
 
 ## Historial de cambios
 
+- **2/oct/2026 (7)** — Alumno de prueba actualizado a `123456 · ROBLES GONZÁLEZ JOSÉ MANUEL · 10B` (README y tabla `alumnos` de Supabase). El panel pasó a su propio repo (CMKAdmin): se actualizó este README para describir solo lo que el panel tiene hoy y se movió lo demás a "Pendiente".
 - **2/oct/2026 (6)** — Identidad PRISMAL MESH en encabezados y documentación (regla 13).
 - **2/oct/2026 (5)** — Acceso por **matrícula** validada en Supabase: tabla `alumnos` (RLS cerrada), funciones `validar_matricula` y `calificar_examen` nueva (recibe matrícula, reemplaza a la anterior), columnas `matricula` y `grupo` en `resultados`. `index.html` muestra nombre, matrícula y grupo en el encabezado fijo del examen.
 - **2/oct/2026 (4)** — `index.html`: cada sección se muestra completa en una sola pantalla (todas sus preguntas), con navegación entre secciones; contexto mostrado una vez por bloque; temporizador de 60 min (`DURACION_MIN`) con entrega automática; preguntas sin responder se mandan como `-1`.

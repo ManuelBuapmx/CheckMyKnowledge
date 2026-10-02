@@ -1,3 +1,5 @@
+# Propiedad intelectual de PRISMAL MESH. Todos los derechos reservados.
+#
 # Compila el APK de depuración en GitHub Actions.
 # Se dispara en cada push a main, o a mano desde la pestaña Actions
 # (workflow_dispatch). El APK queda como "artifact" descargable del run.
@@ -6,10 +8,23 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      # CAMBIO (2/oct/2026): el modo depuración del sensor ya no es una constante escrita en
+      # MainActivity.java; se enciende solo desde aquí, a propósito. Por defecto: apagado.
+      depurar_sensor:
+        description: "Compilar con avisos de depuración del sensor (NO repartir a alumnos)"
+        type: boolean
+        default: false
+
+# CAMBIO (2/oct/2026): permisos mínimos para el token del workflow. Solo necesita leer el código
+# (el workflow no escribe nada al repo: ver nota más abajo).
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       # Descarga el código del repo en el runner.
       - uses: actions/checkout@v4
@@ -30,9 +45,9 @@ jobs:
       # condición de carrera no puede volver a pasar.
       # => NO volver a agregar pasos que escriban/commiteen archivos del repo.
 
-      # CAMBIO (2/oct/2026): el APK firma sus llamadas al servidor con una clave que NO está en el
-      # repo: vive en el secreto de GitHub CMK_FIRMA_SECRETO (Settings > Secrets and variables >
-      # Actions) y es la misma que la fila 'firma_secreto' de la tabla config de Supabase.
+      # El APK firma sus llamadas al servidor con una clave que NO está en el repo: vive en el
+      # secreto de GitHub CMK_FIRMA_SECRETO (Settings > Secrets and variables > Actions) y es la
+      # misma que la fila 'firma_secreto' de la tabla config de Supabase.
       # Este paso aborta la compilación si falta, para no repartir un APK que no pueda calificar.
       # El valor llega por variable de entorno y no se imprime (GitHub lo enmascara en los logs).
       - name: Verificar secreto de firma
@@ -43,6 +58,26 @@ jobs:
             echo "::error::Falta el secreto CMK_FIRMA_SECRETO en GitHub (ver README, 'Firma de la app')."
             exit 1
           fi
+
+      # CAMBIO (2/oct/2026): FIRMA ESTABLE DEL APK. Si existe el secreto CMK_KEYSTORE_B64 (la llave
+      # en base64), se escribe en una carpeta TEMPORAL del runner (nunca dentro del repo, así que no
+      # hay nada que comitear) y se le pasa su ruta a Gradle. Sin el secreto, el build sigue con la
+      # llave de depuración por defecto, pero se avisa: ese APK no se podrá instalar encima de otro.
+      - name: Preparar llave de firma estable
+        env:
+          CMK_KEYSTORE_B64: ${{ secrets.CMK_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$CMK_KEYSTORE_B64" ]; then
+            echo "::warning::No hay secreto CMK_KEYSTORE_B64: el APK sale con firma de depuración efímera y no se podrá instalar encima de una versión anterior (ver README, 'Firma estable del APK')."
+            exit 0
+          fi
+          echo "$CMK_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/cmk.keystore"
+          echo "CMK_KEYSTORE_FILE=$RUNNER_TEMP/cmk.keystore" >> "$GITHUB_ENV"
+
+      # Aviso visible en el run si se pidió depuración, para que nadie reparta ese APK por error.
+      - name: Avisar si es APK de depuración del sensor
+        if: ${{ inputs.depurar_sensor }}
+        run: echo "::warning::Este APK tiene los avisos de depuración del sensor ENCENDIDOS. No lo repartas a alumnos."
 
       # Java 17: requerido por el plugin de Android 8.x (ver build.gradle.kts).
       - uses: actions/setup-java@v4
@@ -57,14 +92,23 @@ jobs:
           gradle-version: "8.9"
 
       # --no-daemon: en un runner efímero no sirve dejar el daemon vivo.
-      # build.gradle.kts lee CMK_FIRMA_SECRETO del entorno y lo mete en BuildConfig.
+      # build.gradle.kts lee estas variables y las mete en BuildConfig / la firma.
+      # En un push "inputs.depurar_sensor" viene vacío, y eso equivale a "false".
       - run: gradle assembleDebug --no-daemon
         env:
           CMK_FIRMA_SECRETO: ${{ secrets.CMK_FIRMA_SECRETO }}
+          CMK_DEPURAR_SENSOR: ${{ inputs.depurar_sensor }}
+          CMK_KEYSTORE_PASS: ${{ secrets.CMK_KEYSTORE_PASS }}
+          CMK_KEY_ALIAS: ${{ secrets.CMK_KEY_ALIAS }}
+          CMK_KEY_PASS: ${{ secrets.CMK_KEY_PASS }}
 
       # Publica el APK para descargarlo desde la página del run.
       # Si cambias la estructura del proyecto, revisa que esta ruta siga existiendo.
+      # retention-days: 7 -> el APK lleva dentro la clave de firma de llamadas; si el repo fuera
+      # público, cualquiera con cuenta de GitHub podría bajarlo mientras exista el artifact.
+      # Mantén el repo PRIVADO (ver README) y no alargues este plazo sin necesidad.
       - uses: actions/upload-artifact@v4
         with:
           name: checkmyknowledge-apk
           path: build/outputs/apk/debug/*.apk
+          retention-days: 7

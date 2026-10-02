@@ -29,7 +29,12 @@ import java.io.InputStream;
  *
  * REGLA CENTRAL: mientras el examen está activo (examenActivo == true),
  * cualquier cosa sospechosa llama a anularExamen(), que CIERRA la app por
- * completo. Al reabrirla, el alumno empieza de cero. No hay "pausa".
+ * completo. Al reabrirla, el alumno vuelve a escribir su matrícula y REANUDA
+ * el MISMO intento: sus respuestas se pierden (viven solo en el WebView), pero
+ * el reloj NO se reinicia ni se pausa, porque la hora de inicio vive en el
+ * servidor (ver iniciar_intento en Supabase y iniciarIntento() en index.html).
+ * Solo hay un intento por matrícula y materia: terminar el tiempo o entregar
+ * lo cierra para siempre. Esta clase no sabe nada de esto; solo cierra la app.
  *
  * COMUNICACIÓN CON index.html: el JS llama a los métodos de la clase Puente
  * (expuesta como window.Android). iniciarExamen() y terminarExamen() marcan
@@ -49,6 +54,9 @@ import java.io.InputStream;
  * se hacía pasar por YouTube y el reproductor respondía error 152-4). Ahora es
  * "https://" + el package de la app, que es como YouTube pide que se identifique
  * una app que embebe sus videos. Ver origenBase().
+ * CAMBIO (2/oct/2026, 3): solo comentarios. Se corrigió la descripción de qué pasa
+ * al reabrir la app tras una anulación (ahora reanuda el intento con el reloj del
+ * servidor). La lógica de esta clase no cambió.
  */
 public class MainActivity extends Activity {
 
@@ -345,7 +353,9 @@ public class MainActivity extends Activity {
 
     /**
      * Anula el examen cerrando la app por completo (y quitándola de Recientes).
-     * No guarda nada: al abrirla de nuevo se empieza de cero. Cualquier regla
+     * Esta clase no guarda nada: las respuestas se pierden. Al abrir la app de nuevo
+     * el alumno puede reanudar el MISMO intento con su matrícula, pero el reloj del
+     * servidor siguió corriendo mientras la app estuvo cerrada. Cualquier regla
      * nueva anti-trampa debería terminar llamando a este método.
      */
     private void anularExamen() {

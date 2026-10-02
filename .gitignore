@@ -1,3 +1,15 @@
 build/
 .gradle/
 local.properties
+
+# Nunca subir APK compilados ni llaves de firma (la llave de firma vive solo como
+# secreto de GitHub, ver README "Firma estable del APK").
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# Archivos de editor / sistema
+.idea/
+*.iml
+.DS_Store

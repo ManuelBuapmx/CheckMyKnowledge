@@ -1,8 +1,14 @@
 // Propiedad intelectual de PRISMAL MESH. Todos los derechos reservados.
 //
 // Configuración de compilación de la app (módulo único, en la raíz del repo).
-// Se compila en GitHub Actions con `gradle assembleDebug` (ver .github/workflows/build.yml);
-// el APK sale en build/outputs/apk/debug/.
+// Se compila en GitHub Actions con `gradle assembleRelease` (ver .github/workflows/build.yml);
+// el APK que se reparte sale en build/outputs/apk/release/.
+//
+// CAMBIO (5/oct/2026, 13): el APK que se reparte a los alumnos ahora es RELEASE (antes era debug).
+// Un APK debug lleva la bandera "debuggable" y es el que más alarma a Play Protect; el release no la
+// lleva y se firma con la llave fija de los secretos de GitHub (la misma que se registra ante Google
+// en la verificación de desarrolladores, ver README "Instalar el APK y reducir las advertencias").
+// El tipo debug sigue existiendo para compilar en tu computadora.
 
 plugins {
     // Plugin de Android para Gradle. La versión (8.5.2) debe ser compatible con
@@ -13,7 +19,7 @@ plugins {
 // Clave con la que el APK firma sus llamadas al servidor (ver Puente.firmar() en MainActivity.java
 // y _verificar_firma en Supabase). NUNCA se escribe en el repo: llega del secreto CMK_FIRMA_SECRETO
 // de GitHub (variable de entorno en el workflow) o, para compilar en tu computadora, de la
-// propiedad cmk.firma (p. ej. `gradle assembleDebug -Pcmk.firma=...`). Si no llega, queda vacía y
+// propiedad cmk.firma (p. ej. `gradle assembleRelease -Pcmk.firma=...`). Si no llega, queda vacía y
 // el APK no podrá hablar con el servidor (el workflow además aborta antes de compilar).
 //
 // CAMBIO (2/oct/2026, 13): se aplica .trim(). Al pegar el secreto en GitHub se coló un salto de
@@ -28,7 +34,7 @@ val firmaSecreto: String = (System.getenv("CMK_FIRMA_SECRETO")
 // constante escrita a mano en MainActivity.java que había que acordarse de apagar, y como cada push
 // a main compila, el APK "normal" salía con los avisos. Ahora solo se enciende a propósito:
 //   - en GitHub: Actions > Compilar APK > Run workflow > marcar "depurar_sensor";
-//   - en tu computadora: `gradle assembleDebug -Pcmk.depurar=true`.
+//   - en tu computadora: `gradle assembleRelease -Pcmk.depurar=true`.
 val depurarSensor: Boolean =
     System.getenv("CMK_DEPURAR_SENSOR") == "true" || project.findProperty("cmk.depurar") == "true"
 
@@ -36,10 +42,15 @@ val depurarSensor: Boolean =
 // (el runner es efímero), y Android rechaza instalar un APK encima de otro con distinta firma:
 // los alumnos tendrían que desinstalar antes de actualizar. Con una llave fija (que vive solo en
 // secretos de GitHub, ver README "Firma estable del APK") las actualizaciones se instalan encima.
-// Si no hay llave, se compila con la llave de depuración por defecto (funciona, pero sin
-// actualización encima).
+//
+// CAMBIO (5/oct/2026, 13): para el APK que se REPARTE la llave es obligatoria: el workflow aborta
+// si falta (ver build.yml). Aquí, al compilar en tu computadora sin llave, el release se firma con
+// la llave de depuración para que al menos se pueda probar, y se avisa. Ese APK NO se reparte.
 val keystoreArchivo: String = System.getenv("CMK_KEYSTORE_FILE") ?: ""
 val firmaEstable: Boolean = keystoreArchivo.isNotEmpty()
+if (!firmaEstable) {
+    logger.warn("AVISO: sin llave de firma estable (CMK_KEYSTORE_FILE). El release se firma con la llave de depuración: solo para pruebas locales, NO repartir.")
+}
 
 android {
     // Identificador interno del código. Debe coincidir con el `package` de
@@ -50,13 +61,15 @@ android {
     defaultConfig {
         // Identificador único de la app en el celular/Play Store. Cambiarlo hace
         // que Android la trate como una app distinta (no actualiza la instalada).
+        // También es el "nombre de paquete" que se registra ante Google en la verificación
+        // de desarrolladores: si lo cambias, hay que registrar el nuevo.
         applicationId = "com.prismalmesh.checkmyknowledge"
         minSdk = 24      // Android 7.0 en adelante
         targetSdk = 34
         // versionCode debe subir en cada versión que quieras que Android
         // reconozca como actualización; versionName es solo el texto visible.
-        versionCode = 3
-        versionName = "0.3"
+        versionCode = 4
+        versionName = "0.4"
 
         // Expone la clave como BuildConfig.FIRMA_SECRETO (la lee MainActivity). Es hexadecimal,
         // así que no necesita escapes dentro de las comillas (y ya viene sin saltos de línea).
@@ -80,6 +93,15 @@ android {
     buildTypes {
         getByName("debug") {
             if (firmaEstable) signingConfig = signingConfigs.getByName("cmk")
+        }
+        // APK que se reparte. isDebuggable = false quita la bandera "debuggable" (la que más
+        // alarma a Play Protect y la que permitiría inspeccionar la app). isMinifyEnabled = false
+        // a propósito: la app no tiene librerías y ofuscar obligaría a mantener reglas para los
+        // métodos del puente JS (@JavascriptInterface); no aporta aquí.
+        getByName("release") {
+            isDebuggable = false
+            isMinifyEnabled = false
+            signingConfig = if (firmaEstable) signingConfigs.getByName("cmk") else signingConfigs.getByName("debug")
         }
     }
 

@@ -1,7 +1,13 @@
 package com.prismalmesh.checkmyknowledge;
 
 import android.app.Activity;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceRequest;
@@ -9,78 +15,249 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
+/**
+ * Única Activity de la app. Es un "cascarón" nativo que:
+ *   1. Muestra en un WebView la app real del alumno (assets/index.html).
+ *   2. Hace cumplir las reglas anti-trampa que HTML/JS no puede hacer solo:
+ *      bloquear capturas, detectar que la app pierde el foco, ignorar el
+ *      botón Atrás y detectar un celular pegado a la pantalla.
+ *
+ * REGLA CENTRAL: mientras el examen está activo (examenActivo == true),
+ * cualquier cosa sospechosa llama a anularExamen(), que CIERRA la app por
+ * completo. Al reabrirla, el alumno empieza de cero. No hay "pausa".
+ *
+ * COMUNICACIÓN CON index.html: el JS llama a los métodos de la clase Puente
+ * (expuesta como window.Android). iniciarExamen() y terminarExamen() marcan
+ * el inicio y fin del periodo vigilado. Si cambias sus nombres, cambia
+ * también las llamadas en assets/index.html.
+ *
+ * HILOS: los callbacks de Puente llegan en un hilo del WebView, NO en el
+ * principal. Por eso tocan estado del temporizador vía runOnUiThread().
+ * El listener del sensor sí corre en el hilo principal (no se le pasa Handler
+ * propio al registrarlo).
+ */
 public class MainActivity extends Activity {
 
     private WebView webView;
+
+    /**
+     * true solo entre iniciarExamen() y terminarExamen() (o hasta que se anule).
+     * Es volatile porque se lee desde varios hilos (WebView y principal).
+     */
     private volatile boolean examenActivo = false;
+
+    // ------------------------------------------------------------------
+    // Detección de "celular pegado a la pantalla" (sensor de proximidad)
+    // ------------------------------------------------------------------
+    // Por qué sensor y no cámara + IA: la cámara es más pesada, da falsos
+    // positivos (mano, funda, poca luz) y grabar la cara de un menor abre
+    // temas de privacidad que no vale la pena abrir. El sensor de proximidad
+    // (el que apaga la pantalla en llamadas) cubre justo este caso: si algo
+    // queda pegado a la parte de arriba de la pantalla por un rato, le
+    // taparon el sensor.
+    //
+    // Si el equipo no tiene sensor, sensorProximidad queda null y esta
+    // defensa simplemente no se activa en ese equipo (no truena nada).
+    //
+    // POR QUÉ UN TEMPORIZADOR (Handler) Y NO COMPARAR TIMESTAMPS:
+    // muchos sensores de proximidad solo emiten un evento cuando CAMBIA el
+    // estado (cerca/lejos). Si solo midiéramos el tiempo dentro de
+    // onSensorChanged, tras el primer "cerca" no llegaría un segundo evento
+    // y el chequeo nunca se cumpliría. Por eso, al ver "cerca" armamos un
+    // temporizador de UMBRAL_CERCA_MS; si llega "lejos" antes de que se
+    // cumpla, se cancela (un roce rápido no anula el examen).
+    private SensorManager sensorManager;
+    private Sensor sensorProximidad;
+
+    /** Cuánto tiempo seguido debe estar "cerca" para anular el examen. */
+    private static final long UMBRAL_CERCA_MS = 800;
+
+    /** Handler atado al hilo principal; ahí corre el callback del temporizador. */
+    private final Handler handler = new Handler(Looper.getMainLooper());
+
+    /** true si hay un callback pendiente en el Handler. Solo se toca en el hilo principal. */
+    private boolean temporizadorArmado = false;
+
+    /**
+     * Última lectura del sensor (true = cerca), haya examen o no.
+     * Sirve para el caso en que el sensor YA estaba tapado cuando el alumno
+     * toca "Comenzar examen": no llegará ningún evento nuevo, así que
+     * iniciarExamen() consulta este valor para armar el temporizador.
+     */
+    private boolean ultimaLecturaCerca = false;
+
+    /**
+     * Se ejecuta UMBRAL_CERCA_MS después de armarse, siempre que no se haya
+     * cancelado antes (porque llegó "lejos", terminó el examen o se pausó la app).
+     */
+    private final Runnable anularPorProximidad = () -> {
+        temporizadorArmado = false;
+        if (examenActivo) anularExamen();
+    };
+
+    /** Arma el temporizador si no hay uno ya corriendo. Llamar solo desde el hilo principal. */
+    private void armarTemporizador() {
+        if (temporizadorArmado) return;
+        temporizadorArmado = true;
+        handler.postDelayed(anularPorProximidad, UMBRAL_CERCA_MS);
+    }
+
+    /** Cancela el temporizador pendiente (si lo hay). Llamar solo desde el hilo principal. */
+    private void cancelarTemporizador() {
+        handler.removeCallbacks(anularPorProximidad);
+        temporizadorArmado = false;
+    }
+
+    private final SensorEventListener escuchaProximidad = new SensorEventListener() {
+        @Override
+        public void onSensorChanged(SensorEvent event) {
+            if (sensorProximidad == null) return;
+            // "Cerca" = lectura menor al rango máximo del sensor. Muchos equipos
+            // solo reportan dos valores (0 = cerca, máximo = lejos); esta
+            // comparación funciona para ambos tipos de sensor.
+            boolean cerca = event.values.length > 0
+                    && event.values[0] < sensorProximidad.getMaximumRange();
+            ultimaLecturaCerca = cerca;
+
+            if (!examenActivo) { cancelarTemporizador(); return; }
+            if (cerca) armarTemporizador(); else cancelarTemporizador();
+        }
+
+        @Override
+        public void onAccuracyChanged(Sensor sensor, int accuracy) { }
+    };
+
+    // ------------------------------------------------------------------
+    // Ciclo de vida
+    // ------------------------------------------------------------------
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // Bloquea capturas y grabación de pantalla
+        // FLAG_SECURE: Android bloquea capturas y grabación de pantalla, y la
+        // app aparece en negro en la vista de Recientes.
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE,
                 WindowManager.LayoutParams.FLAG_SECURE);
+        // Evita que la pantalla se apague sola a mitad del examen.
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+        sensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
+        sensorProximidad = sensorManager.getDefaultSensor(Sensor.TYPE_PROXIMITY);
 
         webView = new WebView(this);
         setContentView(webView);
 
         WebSettings ajustes = webView.getSettings();
-        ajustes.setJavaScriptEnabled(true);
-        ajustes.setAllowFileAccess(false);
+        ajustes.setJavaScriptEnabled(true);   // index.html es JS; necesario
+        ajustes.setAllowFileAccess(false);    // cerrado a propósito...
         ajustes.setAllowContentAccess(false);
+        // ...file:///android_asset/ NO depende de setAllowFileAccess, por eso
+        // loadUrl() de abajo sigue funcionando.
 
+        // Sin menú de copiar/pegar por pulsación larga.
         webView.setLongClickable(false);
         webView.setOnLongClickListener(v -> true);
+
+        // El alumno no puede navegar a ningún otro sitio desde la app.
+        // OJO: esto NO afecta al iframe de YouTube que index.html embebe como
+        // contexto de una pregunta: un iframe no pasa por este método.
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                return true; // no navegar a ningún otro sitio
+                return true;
             }
         });
+
+        // Expone la clase Puente al JS como window.Android.
         webView.addJavascriptInterface(new Puente(), "Android");
         webView.loadUrl("file:///android_asset/index.html");
     }
 
+    /**
+     * Métodos que index.html puede llamar como Android.iniciarExamen(), etc.
+     * Todos llegan en un hilo del WebView, así que el estado del temporizador
+     * se toca dentro de runOnUiThread (hilo principal).
+     */
     public class Puente {
-        @JavascriptInterface
-        public void iniciarExamen() { examenActivo = true; }
 
+        /** El alumno pasó la pantalla de nombre y empezó el examen: comienza la vigilancia. */
         @JavascriptInterface
-        public void terminarExamen() { examenActivo = false; }
+        public void iniciarExamen() {
+            runOnUiThread(() -> {
+                examenActivo = true;
+                // Si el sensor ya estaba tapado, no llegará un evento nuevo: armamos aquí.
+                if (ultimaLecturaCerca) armarTemporizador();
+            });
+        }
 
+        /** El alumno contestó la última pregunta: termina la vigilancia (para poder mostrar el resultado). */
+        @JavascriptInterface
+        public void terminarExamen() {
+            runOnUiThread(() -> {
+                examenActivo = false;
+                cancelarTemporizador();
+            });
+        }
+
+        /** Botón "Salir" de la pantalla final: cierra la app y la quita de Recientes. */
         @JavascriptInterface
         public void salir() { runOnUiThread(() -> finishAndRemoveTask()); }
     }
 
-    // Si pierde el foco (notificaciones, ventana flotante, etc.) durante el examen
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (sensorProximidad != null) {
+            // SENSOR_DELAY_UI basta: solo nos importa el cambio cerca/lejos.
+            sensorManager.registerListener(escuchaProximidad, sensorProximidad, SensorManager.SENSOR_DELAY_UI);
+        }
+    }
+
+    /**
+     * Pierde el foco (notificación desplegada, ventana flotante, panel de
+     * ajustes rápidos, etc.) durante el examen: se anula.
+     */
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (!hasFocus && examenActivo) anularExamen();
     }
 
-    // Si va a Inicio, Recientes o cambia de app durante el examen
+    /**
+     * Va a Inicio, Recientes o cambia de app durante el examen: se anula.
+     * También deja el sensor y el temporizador limpios para que no queden
+     * callbacks ni lecturas viejas al volver a la app.
+     */
     @Override
     protected void onPause() {
         super.onPause();
+        sensorManager.unregisterListener(escuchaProximidad);
+        cancelarTemporizador();
+        ultimaLecturaCerca = false; // al volver, el sensor mandará una lectura fresca
         if (examenActivo) anularExamen();
     }
 
-    // El botón Atrás no hace nada durante el examen
+    /** Durante el examen el botón Atrás no hace nada; fuera de él se comporta normal. */
     @Override
     public void onBackPressed() {
         if (!examenActivo) super.onBackPressed();
     }
 
+    /**
+     * Anula el examen cerrando la app por completo (y quitándola de Recientes).
+     * No guarda nada: al abrirla de nuevo se empieza de cero. Cualquier regla
+     * nueva anti-trampa debería terminar llamando a este método.
+     */
     private void anularExamen() {
         examenActivo = false;
-        finishAndRemoveTask(); // cierra la app; al abrirla empieza de cero
+        cancelarTemporizador();
+        finishAndRemoveTask();
     }
 
     @Override
     protected void onDestroy() {
+        handler.removeCallbacksAndMessages(null);
         if (webView != null) webView.destroy();
         super.onDestroy();
     }

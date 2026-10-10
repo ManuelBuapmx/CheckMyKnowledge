@@ -1,308 +1,114 @@
+# Propiedad intelectual de PRISMAL MESH. Todos los derechos reservados.
+#
+# Compila el APK de depuración en GitHub Actions.
+# Se dispara en cada push a main, o a mano desde la pestaña Actions
+# (workflow_dispatch). El APK queda como "artifact" descargable del run.
 name: Compilar APK
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      # CAMBIO (2/oct/2026): el modo depuración del sensor ya no es una constante escrita en
+      # MainActivity.java; se enciende solo desde aquí, a propósito. Por defecto: apagado.
+      depurar_sensor:
+        description: "Compilar con avisos de depuración del sensor (NO repartir a alumnos)"
+        type: boolean
+        default: false
 
+# CAMBIO (2/oct/2026): permisos mínimos para el token del workflow. Solo necesita leer el código
+# (el workflow no escribe nada al repo: ver nota más abajo).
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
+      # Descarga el código del repo en el runner.
       - uses: actions/checkout@v4
 
-      - name: Crear archivos del proyecto (solo la primera vez)
+      # NOTA (28/sep/2026): antes de este paso había un bloque "Crear
+      # archivos del proyecto (solo la primera vez)" que regeneraba
+      # build.gradle.kts, settings.gradle.kts, AndroidManifest.xml,
+      # MainActivity.java e index.html, y luego hacía "git commit && git push"
+      # de vuelta al repo. Ese bootstrap ya cumplió su función una sola vez,
+      # cuando el repo estaba vacío (ver run #1, commit "Crear proyecto
+      # inicial"). El error "exit code 1" de ese run fue justo el
+      # "git push rechazado": el runner comiteó sus archivos localmente pero
+      # main ya había avanzado en GitHub (por el propio commit del workflow),
+      # así que el push chocó con "! [rejected] main -> main (fetch first)".
+      # Como los 6 archivos que generaba ese bloque ya están permanentemente
+      # comiteados en main, el bloque quedó eliminado: ya no hace falta
+      # regenerarlos ni volver a intentar un push en cada build, así que esa
+      # condición de carrera no puede volver a pasar.
+      # => NO volver a agregar pasos que escriban/commiteen archivos del repo.
+
+      # El APK firma sus llamadas al servidor con una clave que NO está en el repo: vive en el
+      # secreto de GitHub CMK_FIRMA_SECRETO (Settings > Secrets and variables > Actions) y es la
+      # misma que la fila 'firma_secreto' de la tabla config de Supabase.
+      # Este paso aborta la compilación si falta, para no repartir un APK que no pueda calificar.
+      # El valor llega por variable de entorno y no se imprime (GitHub lo enmascara en los logs).
+      - name: Verificar secreto de firma
+        env:
+          CMK_FIRMA_SECRETO: ${{ secrets.CMK_FIRMA_SECRETO }}
         run: |
-          if [ -f build.gradle.kts ]; then exit 0; fi
-          mkdir -p src/main/java/com/prismalmesh/checkmyknowledge src/main/assets
+          if [ -z "$CMK_FIRMA_SECRETO" ]; then
+            echo "::error::Falta el secreto CMK_FIRMA_SECRETO en GitHub (ver README, 'Firma de la app')."
+            exit 1
+          fi
 
-          cat > .gitignore << 'EOF'
-          build/
-          .gradle/
-          local.properties
-          EOF
+      # CAMBIO (2/oct/2026): FIRMA ESTABLE DEL APK. Si existe el secreto CMK_KEYSTORE_B64 (la llave
+      # en base64), se escribe en una carpeta TEMPORAL del runner (nunca dentro del repo, así que no
+      # hay nada que comitear) y se le pasa su ruta a Gradle. Sin el secreto, el build sigue con la
+      # llave de depuración por defecto, pero se avisa: ese APK no se podrá instalar encima de otro.
+      - name: Preparar llave de firma estable
+        env:
+          CMK_KEYSTORE_B64: ${{ secrets.CMK_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$CMK_KEYSTORE_B64" ]; then
+            echo "::warning::No hay secreto CMK_KEYSTORE_B64: el APK sale con firma de depuración efímera y no se podrá instalar encima de una versión anterior (ver README, 'Firma estable del APK')."
+            exit 0
+          fi
+          echo "$CMK_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/cmk.keystore"
+          echo "CMK_KEYSTORE_FILE=$RUNNER_TEMP/cmk.keystore" >> "$GITHUB_ENV"
 
-          cat > settings.gradle.kts << 'EOF'
-          pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-          rootProject.name = "checkmyknowledge"
-          EOF
+      # Aviso visible en el run si se pidió depuración, para que nadie reparta ese APK por error.
+      - name: Avisar si es APK de depuración del sensor
+        if: ${{ inputs.depurar_sensor }}
+        run: echo "::warning::Este APK tiene los avisos de depuración del sensor ENCENDIDOS. No lo repartas a alumnos."
 
-          cat > build.gradle.kts << 'EOF'
-          plugins {
-              id("com.android.application") version "8.5.2"
-          }
-
-          android {
-              namespace = "com.prismalmesh.checkmyknowledge"
-              compileSdk = 34
-
-              defaultConfig {
-                  applicationId = "com.prismalmesh.checkmyknowledge"
-                  minSdk = 24
-                  targetSdk = 34
-                  versionCode = 1
-                  versionName = "0.1"
-              }
-
-              compileOptions {
-                  sourceCompatibility = JavaVersion.VERSION_17
-                  targetCompatibility = JavaVersion.VERSION_17
-              }
-          }
-          EOF
-
-          cat > src/main/AndroidManifest.xml << 'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
-              <uses-permission android:name="android.permission.INTERNET" />
-
-              <application
-                  android:label="CheckMyKnowledge"
-                  android:allowBackup="false"
-                  android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
-
-                  <activity
-                      android:name=".MainActivity"
-                      android:exported="true"
-                      android:screenOrientation="portrait"
-                      android:resizeableActivity="false"
-                      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode|locale|layoutDirection|fontScale">
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN" />
-                          <category android:name="android.intent.category.LAUNCHER" />
-                      </intent-filter>
-                  </activity>
-              </application>
-          </manifest>
-          EOF
-
-          cat > src/main/java/com/prismalmesh/checkmyknowledge/MainActivity.java << 'EOF'
-          package com.prismalmesh.checkmyknowledge;
-
-          import android.app.Activity;
-          import android.os.Bundle;
-          import android.view.WindowManager;
-          import android.webkit.JavascriptInterface;
-          import android.webkit.WebResourceRequest;
-          import android.webkit.WebSettings;
-          import android.webkit.WebView;
-          import android.webkit.WebViewClient;
-
-          public class MainActivity extends Activity {
-
-              private WebView webView;
-              private volatile boolean examenActivo = false;
-
-              @Override
-              protected void onCreate(Bundle savedInstanceState) {
-                  super.onCreate(savedInstanceState);
-
-                  // Bloquea capturas y grabación de pantalla
-                  getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE,
-                          WindowManager.LayoutParams.FLAG_SECURE);
-                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-
-                  webView = new WebView(this);
-                  setContentView(webView);
-
-                  WebSettings ajustes = webView.getSettings();
-                  ajustes.setJavaScriptEnabled(true);
-                  ajustes.setAllowFileAccess(false);
-                  ajustes.setAllowContentAccess(false);
-
-                  webView.setLongClickable(false);
-                  webView.setOnLongClickListener(v -> true);
-                  webView.setWebViewClient(new WebViewClient() {
-                      @Override
-                      public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                          return true; // no navegar a ningún otro sitio
-                      }
-                  });
-                  webView.addJavascriptInterface(new Puente(), "Android");
-                  webView.loadUrl("file:///android_asset/index.html");
-              }
-
-              public class Puente {
-                  @JavascriptInterface
-                  public void iniciarExamen() { examenActivo = true; }
-
-                  @JavascriptInterface
-                  public void terminarExamen() { examenActivo = false; }
-
-                  @JavascriptInterface
-                  public void salir() { runOnUiThread(() -> finishAndRemoveTask()); }
-              }
-
-              // Si pierde el foco (notificaciones, ventana flotante, etc.) durante el examen
-              @Override
-              public void onWindowFocusChanged(boolean hasFocus) {
-                  super.onWindowFocusChanged(hasFocus);
-                  if (!hasFocus && examenActivo) anularExamen();
-              }
-
-              // Si va a Inicio, Recientes o cambia de app durante el examen
-              @Override
-              protected void onPause() {
-                  super.onPause();
-                  if (examenActivo) anularExamen();
-              }
-
-              // El botón Atrás no hace nada durante el examen
-              @Override
-              public void onBackPressed() {
-                  if (!examenActivo) super.onBackPressed();
-              }
-
-              private void anularExamen() {
-                  examenActivo = false;
-                  finishAndRemoveTask(); // cierra la app; al abrirla empieza de cero
-              }
-
-              @Override
-              protected void onDestroy() {
-                  if (webView != null) webView.destroy();
-                  super.onDestroy();
-              }
-          }
-          EOF
-
-          cat > src/main/assets/index.html << 'EOF'
-          <!DOCTYPE html>
-          <html lang="es">
-          <head>
-          <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1">
-          <title>CheckMyKnowledge</title>
-          <style>
-            * { box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
-            body { margin: 0; padding: 16px; font-family: sans-serif; background: #f5f5f5; color: #222; }
-            h1 { font-size: 20px; }
-            .card { background: #fff; border-radius: 12px; padding: 16px; }
-            button { width: 100%; padding: 14px; margin-top: 10px; font-size: 16px; border: 0; border-radius: 10px; background: #1565c0; color: #fff; }
-            button.op { background: #fff; color: #222; border: 2px solid #ccc; text-align: left; }
-            button.op.sel { border-color: #1565c0; background: #e3f2fd; }
-            button:disabled { opacity: .4; }
-            input { width: 100%; padding: 12px; font-size: 16px; border: 2px solid #ccc; border-radius: 10px; -webkit-user-select: text; user-select: text; }
-            .aviso { font-size: 14px; color: #b71c1c; }
-          </style>
-          </head>
-          <body>
-          <div id="app"></div>
-          <script>
-          var PREGUNTAS = [
-            { t: "Pregunta de prueba 1: elige la opción B", o: ["Opción A", "Opción B", "Opción C", "Opción D"], c: 1 },
-            { t: "Pregunta de prueba 2: elige la opción D", o: ["Opción A", "Opción B", "Opción C", "Opción D"], c: 3 },
-            { t: "Pregunta de prueba 3: elige la opción A", o: ["Opción A", "Opción B", "Opción C", "Opción D"], c: 0 }
-          ];
-          var app = document.getElementById("app");
-          var nombre = "", idx = 0, resp = [];
-
-          document.addEventListener("contextmenu", function (e) { e.preventDefault(); });
-
-          function el(tag, texto, clase) {
-            var e = document.createElement(tag);
-            if (texto) e.textContent = texto;
-            if (clase) e.className = clase;
-            return e;
-          }
-          function pantalla(card) { app.innerHTML = ""; app.appendChild(card); }
-
-          function inicio() {
-            var c = el("div", "", "card");
-            c.appendChild(el("h1", "CheckMyKnowledge"));
-            c.appendChild(el("p", "Escribe tu nombre completo:"));
-            var inp = el("input");
-            inp.type = "text";
-            inp.setAttribute("autocomplete", "off");
-            c.appendChild(inp);
-            c.appendChild(el("p", "Al comenzar no podrás salir, minimizar, cambiar de pantalla ni tomar capturas. Si lo haces, el examen se cierra y deberás empezar de nuevo.", "aviso"));
-            var msg = el("p", "", "aviso");
-            c.appendChild(msg);
-            var b = el("button", "Comenzar examen");
-            b.onclick = function () {
-              if (inp.value.trim().length < 3) { msg.textContent = "Escribe tu nombre."; return; }
-              nombre = inp.value.trim();
-              inp.blur();
-              setTimeout(function () {
-                if (window.Android) Android.iniciarExamen();
-                idx = 0; resp = [];
-                pregunta();
-              }, 300);
-            };
-            c.appendChild(b);
-            pantalla(c);
-          }
-
-          function pregunta() {
-            var p = PREGUNTAS[idx];
-            var c = el("div", "", "card");
-            c.appendChild(el("p", "Pregunta " + (idx + 1) + " de " + PREGUNTAS.length));
-            c.appendChild(el("h1", p.t));
-            var sig = el("button", idx + 1 < PREGUNTAS.length ? "Siguiente" : "Terminar");
-            sig.disabled = resp[idx] === undefined;
-            p.o.forEach(function (txt, i) {
-              var b = el("button", String.fromCharCode(65 + i) + ") " + txt, "op" + (resp[idx] === i ? " sel" : ""));
-              b.onclick = function () {
-                resp[idx] = i;
-                var todos = c.querySelectorAll(".op");
-                for (var k = 0; k < todos.length; k++) todos[k].className = "op" + (k === i ? " sel" : "");
-                sig.disabled = false;
-              };
-              c.appendChild(b);
-            });
-            sig.onclick = function () {
-              if (idx + 1 < PREGUNTAS.length) { idx++; pregunta(); } else { fin(); }
-            };
-            c.appendChild(sig);
-            pantalla(c);
-          }
-
-          function fin() {
-            if (window.Android) Android.terminarExamen();
-            var bien = 0;
-            PREGUNTAS.forEach(function (p, i) { if (resp[i] === p.c) bien++; });
-            var c = el("div", "", "card");
-            c.appendChild(el("h1", "Examen terminado"));
-            c.appendChild(el("p", nombre + ": " + bien + " de " + PREGUNTAS.length + " correctas (prueba)"));
-            var b = el("button", "Salir");
-            b.onclick = function () { if (window.Android) Android.salir(); else inicio(); };
-            c.appendChild(b);
-            pantalla(c);
-          }
-
-          inicio();
-          </script>
-          </body>
-          </html>
-          EOF
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "Crear proyecto inicial"
-          git push
-
+      # Java 17: requerido por el plugin de Android 8.x (ver build.gradle.kts).
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
+      # Instala Gradle 8.9 (el repo no incluye gradlew). Mantener compatible
+      # con la versión del plugin de Android en build.gradle.kts.
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
+      # --no-daemon: en un runner efímero no sirve dejar el daemon vivo.
+      # build.gradle.kts lee estas variables y las mete en BuildConfig / la firma.
+      # En un push "inputs.depurar_sensor" viene vacío, y eso equivale a "false".
       - run: gradle assembleDebug --no-daemon
+        env:
+          CMK_FIRMA_SECRETO: ${{ secrets.CMK_FIRMA_SECRETO }}
+          CMK_DEPURAR_SENSOR: ${{ inputs.depurar_sensor }}
+          CMK_KEYSTORE_PASS: ${{ secrets.CMK_KEYSTORE_PASS }}
+          CMK_KEY_ALIAS: ${{ secrets.CMK_KEY_ALIAS }}
+          CMK_KEY_PASS: ${{ secrets.CMK_KEY_PASS }}
 
+      # Publica el APK para descargarlo desde la página del run.
+      # Si cambias la estructura del proyecto, revisa que esta ruta siga existiendo.
+      # retention-days: 7 -> el APK lleva dentro la clave de firma de llamadas; si el repo fuera
+      # público, cualquiera con cuenta de GitHub podría bajarlo mientras exista el artifact.
+      # Mantén el repo PRIVADO (ver README) y no alargues este plazo sin necesidad.
       - uses: actions/upload-artifact@v4
         with:
           name: checkmyknowledge-apk
           path: build/outputs/apk/debug/*.apk
+          retention-days: 7

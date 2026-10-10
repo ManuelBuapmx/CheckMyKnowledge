@@ -1,4 +1,39 @@
 <!DOCTYPE html>
+<!--
+  CheckMy Knowledge · App del alumno
+  Propiedad intelectual de PRISMAL MESH. Todos los derechos reservados.
+
+  CAMBIO (2/oct/2026, 8): UN INTENTO por matrícula y materia. Al comenzar, la app llama a
+  iniciar_intento (Supabase), que guarda la hora de inicio EN EL SERVIDOR. Si el alumno cierra
+  o reinicia la app puede volver a entrar con su matrícula, pero el reloj NO se detiene: el
+  servidor devuelve los segundos que le quedan. El intento termina al entregar o al acabarse
+  el tiempo. Ya no existe buscarAlumno(); la validación de matrícula la hace iniciar_intento.
+
+  CAMBIO (2/oct/2026, 9): FIRMA DE LA APP. Cada llamada al servidor (iniciar_intento,
+  obtener_preguntas, calificar_examen) lleva una firma HMAC que solo el APK sabe generar
+  (Android.firmar, ver MainActivity.java). Así el examen no se puede presentar desde un
+  navegador o script usando solo la clave pública. Las preguntas ya NO se leen por REST:
+  se piden con la RPC obtener_preguntas, que exige intento en curso y firma válida.
+
+  CAMBIO (2/oct/2026, 11): correcciones de la revisión de anomalías.
+   - El reloj usa performance.now() (reloj monotónico) y no Date.now(): cambiar la hora del
+     celular durante el examen ya no adelanta ni atrasa la entrega automática.
+   - Se arregló el "reloj huérfano": si el tiempo ya estaba vencido al arrancar, fin() se
+     ejecutaba ANTES de que existiera el intervalo y este quedaba corriendo, además de que
+     la pantalla de preguntas pisaba "Calificando...". Ahora un restante_seg <= 0 se trata
+     como "agotado" y el intervalo se registra antes del primer tick.
+   - El reproductor de YouTube se pide sin botón de pantalla completa, sin logotipo ni
+     anotaciones (fs, modestbranding, iv_load_policy), para reducir enlaces que saquen al
+     alumno de la app (y la anulen). No elimina todos los enlaces posibles.
+
+  CAMBIO (2/oct/2026, 12): LÍMITE DE REANUDACIONES. Salir de la app y volver ya no es gratis:
+  el servidor cuenta cuántas veces el alumno vuelve a un intento al que YA se le entregaron
+  las preguntas. Se permiten MAX_REANUDACIONES (2); a la tercera, iniciar_intento cierra el
+  intento con 0 y responde el estado "anulado". El límite real vive en el servidor (fila
+  max_reanudaciones de la tabla config); MAX_REANUDACIONES de este archivo solo es para los
+  textos que ve el alumno: si cambias uno, cambia el otro. Un estado desconocido del servidor
+  se trata como examen cerrado (nunca abre el examen).
+-->
 <html lang="es">
 <head>
 <meta charset="utf-8">
@@ -12,9 +47,55 @@
   button { width: 100%; padding: 14px; margin-top: 10px; font-size: 16px; border: 0; border-radius: 10px; background: #1565c0; color: #fff; }
   button.op { background: #fff; color: #222; border: 2px solid #ccc; text-align: left; }
   button.op.sel { border-color: #1565c0; background: #e3f2fd; }
+  /* Botón secundario (p. ej. "Sección anterior"). */
+  button.sec { background: #fff; color: #1565c0; border: 2px solid #1565c0; }
   button:disabled { opacity: .4; }
   input { width: 100%; padding: 12px; font-size: 16px; border: 2px solid #ccc; border-radius: 10px; -webkit-user-select: text; user-select: text; }
   .aviso { font-size: 14px; color: #b71c1c; }
+  /* Etiqueta de sección (p. ej. "Unidad 1 - Present Simple"): agrupa/organiza
+     preguntas de una misma materia. Es solo texto libre en preguntas.seccion —
+     no es una tabla aparte ni afecta la calificación. Ahora la sección es la
+     pantalla completa: todas sus preguntas se muestran juntas debajo de ella. */
+  .seccion-label {
+    font-size: 13px; font-weight: 700; color: #1565c0; text-transform: uppercase;
+    letter-spacing: .3px; margin: -4px 0 8px;
+  }
+  /* Cada pregunta dentro de la pantalla de sección va separada por una línea. */
+  .pregunta-bloque { padding: 14px 0; border-top: 1px solid #e0e0e0; }
+  .pregunta-bloque:first-of-type { border-top: 0; }
+  .pregunta-bloque h2 { font-size: 17px; margin: 0 0 4px; }
+  /* --- Reloj del examen ---
+     Barra fija arriba, FUERA de #app, para que siga visible y no se borre cuando
+     se cambia de sección (pantalla() solo reemplaza el contenido de #app). */
+  #reloj {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 10; text-align: center;
+    padding: 6px 8px; background: #1565c0; color: #fff;
+    font-variant-numeric: tabular-nums;
+  }
+  #reloj .reloj-tiempo { font-size: 18px; font-weight: 700; }
+  /* Encabezado del examen: nombre, matrícula y grupo del alumno que accedió. */
+  #reloj .reloj-alumno { font-size: 12px; font-weight: 400; margin-top: 2px; }
+  /* Últimos 5 minutos: se pone rojo para avisar al alumno. */
+  #reloj.poco { background: #b71c1c; }
+  body.con-reloj { padding-top: 76px; }
+  /* --- Contexto por pregunta (video embebido o texto de apoyo/lectura) ---
+     El video SIEMPRE va embebido (iframe), nunca como link externo: un link
+     que abra YouTube fuera de la app cancelaría el examen (ver anularExamen()
+     en MainActivity.java — onPause()/onWindowFocusChanged() cierran la app si
+     pierde el foco). */
+  .video-envoltorio {
+    position: relative; width: 100%; padding-bottom: 56.25%; height: 0;
+    margin-bottom: 12px; border-radius: 8px; overflow: hidden; background: #000;
+  }
+  .video-envoltorio iframe { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0; }
+  .contexto-texto {
+    background: #eef4fb; border-left: 4px solid #1565c0; border-radius: 6px;
+    padding: 10px 12px; margin-bottom: 12px; font-size: 14px; line-height: 1.4;
+    white-space: pre-wrap; -webkit-user-select: text; user-select: text;
+  }
+  /* Mensaje que aparece bajo el video cuando el reproductor de YouTube falla
+     (ver crearReproductor()). */
+  .video-aviso { font-size: 13px; color: #b71c1c; margin: -6px 0 12px; }
 </style>
 </head>
 <body>
@@ -27,42 +108,220 @@
 var SUPABASE_URL = "https://juvqvshcfsrtscvzluaa.supabase.co";
 var SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp1dnF2c2hjZnNydHNjdnpsdWFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAzMDY4NjQsImV4cCI6MjEwNTg4Mjg2NH0.aL2bzJbTJ6DfzUlh8UaSBZ5Fah3Bae1tNBDi7R6BD68";
 
-function cargarPreguntas() {
-  var url = SUPABASE_URL + "/rest/v1/preguntas?select=texto,opciones,correcta&activa=eq.true&order=orden.asc";
-  return fetch(url, {
+// ---- Firma de la app ----
+// Pide al APK (Android.firmar) que firme la llamada: devuelve { ts, firma }, donde ts son los
+// segundos Unix del celular y firma es HMAC-SHA256(clave de la app, accion|matricula|materia|ts).
+// La clave NO está en este HTML: vive compilada en el APK y en el servidor, y el servidor
+// rechaza cualquier llamada sin firma válida. Fuera del APK (navegador, script) no existe
+// Android.firmar, así que se manda sin firma y el servidor la rechaza.
+// Se firma en CADA llamada (incluidos los reintentos) para que el ts sea reciente.
+function firmar(accion, matricula, materia) {
+  try {
+    if (window.Android && Android.firmar) {
+      var r = String(Android.firmar(accion, String(matricula), String(materia)) || "");
+      var i = r.indexOf(":");
+      if (i > 0) return { ts: Number(r.slice(0, i)), firma: r.slice(i + 1) };
+    }
+  } catch (e) {}
+  return { ts: null, firma: null };
+}
+
+// ---- Intento único (en el servidor) ----
+// La lista de alumnos vive en la tabla "alumnos" de Supabase y el rol anon NO
+// puede leerla. Solo puede llamar a funciones RPC. iniciar_intento hace CUATRO cosas:
+//   1. valida la matrícula (existe y está activa),
+//   2. crea el intento de esa matrícula+materia guardando la hora de inicio, o lo
+//      REANUDA si ya existía y sigue en curso (el alumno cerró/reinició la app),
+//   3. cuenta las reanudaciones (solo si ya se le habían entregado las preguntas) y,
+//      si excede el límite, cierra el intento con 0,
+//   4. devuelve los segundos que le quedan, calculados con el reloj del servidor.
+// Regresa una promesa con un objeto { estado, ... }:
+//   "ok"          -> puede contestar; trae matricula, nombre, grupo, restante_seg,
+//                    reanudaciones (las que lleva) y max_reanudaciones
+//   "usado"       -> ya entregó este examen (no hay segundo intento)
+//   "agotado"     -> se le acabó el tiempo con la app cerrada; el servidor ya lo registró con 0
+//   "anulado"     -> excedió las reanudaciones permitidas; el servidor ya lo registró con 0
+//   "noregistrada"-> matrícula inexistente o desactivada
+// Los estados "usado", "agotado" y "anulado" llegan como respuesta normal (no como error HTTP)
+// porque el servidor necesita guardar el cierre con 0 sin que se revierta.
+function iniciarIntento(matricula, materia) {
+  var m = String(matricula || "").replace(/\s+/g, "");
+  if (!m) return Promise.resolve({ estado: "noregistrada" });
+  var f = firmar("iniciar", m, materia);
+  return fetch(SUPABASE_URL + "/rest/v1/rpc/iniciar_intento", {
+    method: "POST",
     headers: {
       apikey: SUPABASE_ANON_KEY,
-      Authorization: "Bearer " + SUPABASE_ANON_KEY
-    }
+      Authorization: "Bearer " + SUPABASE_ANON_KEY,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ p_matricula: m, p_materia_id: materia, p_ts: f.ts, p_firma: f.firma })
   }).then(function (resp) {
-    if (!resp.ok) throw new Error("No se pudieron cargar las preguntas");
-    return resp.json();
-  }).then(function (filas) {
-    return filas.map(function (f) { return { t: f.texto, o: f.opciones, c: f.correcta }; });
+    if (resp.ok) return resp.json();
+    return resp.text().then(function (t) {
+      // La función lanza 'Matrícula no registrada' → es un rechazo normal, no un fallo de red.
+      if (t.indexOf("Matrícula no registrada") !== -1) return { estado: "noregistrada" };
+      throw new Error(t || "No se pudo iniciar el intento");
+    });
   });
 }
 
-function guardarResultado(nombreAlumno, correctas, total, respuestas) {
-  var url = SUPABASE_URL + "/rest/v1/resultados";
+// Duración total del examen, en minutos. SOLO SE MUESTRA al alumno: la duración real la
+// define el servidor (función duracion_examen() en Supabase). Si la cambias, cámbiala en ambos.
+var DURACION_MIN = 60;
+
+// Reanudaciones permitidas, SOLO PARA LOS TEXTOS: el límite real lo aplica el servidor (fila
+// max_reanudaciones de la tabla config). Si cambias uno, cambia el otro.
+var MAX_REANUDACIONES = 2;
+
+function cargarMaterias() {
+  var url = SUPABASE_URL + "/rest/v1/materias?select=id,nombre&activa=eq.true&order=orden.asc";
+  return fetch(url, {
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + SUPABASE_ANON_KEY }
+  }).then(function (resp) {
+    if (!resp.ok) throw new Error("No se pudieron cargar las materias");
+    return resp.json();
+  });
+}
+
+function cargarPreguntas(materiaId, matricula) {
+  // Las preguntas ya NO se leen por REST (cualquiera podía bajarlas sin matrícula): se piden a la
+  // RPC obtener_preguntas, que exige un intento en curso y una firma válida de la app.
+  // Nunca entrega la respuesta correcta — la calificación se hace del lado seguro, ver
+  // calificarExamen(). "seccion" es la etiqueta opcional de agrupación (ver .seccion-label).
+  // Al entregarlas, el servidor marca el intento como "preguntas entregadas": desde ese momento
+  // cada regreso a este intento cuenta como una reanudación.
+  var f = firmar("preguntas", matricula, materiaId);
+  return fetch(SUPABASE_URL + "/rest/v1/rpc/obtener_preguntas", {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: "Bearer " + SUPABASE_ANON_KEY,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ p_matricula: matricula, p_materia_id: materiaId, p_ts: f.ts, p_firma: f.firma })
+  }).then(function (resp) {
+    // Se conserva el texto del error del servidor (p. ej. "Reloj desajustado") para que
+    // inicio() pueda explicarle al alumno qué pasó.
+    if (!resp.ok) return resp.text().then(function (t) { throw new Error(t || "No se pudieron cargar las preguntas"); });
+    return resp.json();
+  }).then(function (filas) {
+    return filas.map(function (f) { return { t: f.texto, o: f.opciones, x: f.contexto || null, s: f.seccion || null }; });
+  });
+}
+
+// La calificación se calcula en el servidor (función calificar_examen), que es
+// la única que puede leer cuál era la opción correcta. El cliente nunca la ve,
+// ni antes ni después: solo recibe el resultado ya calculado.
+// El servidor además EXIGE que exista un intento en curso (creado por iniciar_intento)
+// y dentro de tiempo, y lo cierra al calificar: no hay segunda calificación posible.
+function calificarExamen(materiaId, matricula, respuestas) {
+  var url = SUPABASE_URL + "/rest/v1/rpc/calificar_examen";
+  var f = firmar("calificar", matricula, materiaId);
   return fetch(url, {
     method: "POST",
     headers: {
       apikey: SUPABASE_ANON_KEY,
       Authorization: "Bearer " + SUPABASE_ANON_KEY,
-      "Content-Type": "application/json",
-      Prefer: "return=minimal"
+      "Content-Type": "application/json"
     },
-    body: JSON.stringify({ nombre: nombreAlumno, correctas: correctas, total: total, respuestas: respuestas })
-  }).catch(function (e) {
-    // Si falla el guardado (sin conexión, etc.) no debe impedir que el alumno vea su resultado.
-    console.log("No se pudo guardar el resultado", e);
+    body: JSON.stringify({ p_materia_id: materiaId, p_matricula: matricula, p_respuestas: respuestas, p_ts: f.ts, p_firma: f.firma })
+  }).then(function (resp) {
+    if (!resp.ok) return resp.text().then(function (t) { throw new Error(t || "No se pudo calificar el examen"); });
+    return resp.json();
   });
 }
 
+// Busca un link de YouTube (youtube.com/watch?v=, youtu.be/, o ya en formato
+// /embed/) dentro de un texto libre y regresa solo el ID del video, o null si no
+// encuentra ninguno. Se usa para decidir si el "contexto" de una pregunta
+// se muestra como video embebido o como bloque de texto plano.
+function extraerIdYoutube(texto) {
+  if (!texto) return null;
+  var m = /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([A-Za-z0-9_-]{6,})/.exec(texto);
+  return m ? m[1] : null;
+}
+
+// ---- Reproductor de YouTube (API oficial de iframe) ----
+// La página se identifica ante YouTube con su origen (parámetro "origin"), que
+// es lo que el reproductor exige, y la API avisa el CÓDIGO del error (onError),
+// que se muestra bajo el video para saber la causa real.
+//
+// La API es https://www.youtube.com/iframe_api; al cargar llama a la función global
+// onYouTubeIframeAPIReady. Mientras no esté lista, las peticiones de video se
+// guardan en ytCola y se ejecutan cuando llegue.
+var ytListo = false;
+var ytCola = [];
+var ytContador = 0; // para dar un id único a cada contenedor de reproductor
+
+window.onYouTubeIframeAPIReady = function () {
+  ytListo = true;
+  ytCola.forEach(function (f) { f(); });
+  ytCola = [];
+};
+
+function cargarApiYoutube() {
+  if (document.getElementById("yt-api")) return; // ya se pidió
+  var s = document.createElement("script");
+  s.id = "yt-api";
+  s.src = "https://www.youtube.com/iframe_api";
+  document.head.appendChild(s);
+}
+
+// Texto para el alumno/profesor según el código de error de YouTube.
+function mensajeErrorVideo(codigo) {
+  if (codigo === 101 || codigo === 150) return "El dueño del video no permite verlo dentro de otras apps (código " + codigo + "). Avisa a tu profesor.";
+  if (codigo === 100) return "El video no existe o es privado (código 100). Avisa a tu profesor.";
+  if (codigo === 153) return "YouTube rechazó la configuración del reproductor (código 153). Avisa a tu profesor.";
+  if (codigo === 2) return "El enlace del video no es válido (código 2). Avisa a tu profesor.";
+  return "No se pudo reproducir el video (código " + codigo + "). Avisa a tu profesor.";
+}
+
+// Crea el reproductor dentro de "destino" (un <div> ya presente en la pantalla).
+// "aviso" es el elemento donde se escribe el mensaje si algo falla.
+function crearReproductor(destino, idVideo, aviso) {
+  function iniciar() {
+    // Parámetros que reducen los enlaces que podrían sacar al alumno de la app (abrir YouTube
+    // fuera de la app hace perder el foco y anula el examen, ver regla 6 del README):
+    //   fs: 0              -> sin botón de pantalla completa
+    //   modestbranding: 1  -> sin logotipo de YouTube en la barra de control
+    //   iv_load_policy: 3  -> sin anotaciones/tarjetas del video
+    //   rel: 0             -> los videos relacionados salen del mismo canal
+    // No eliminan TODOS los enlaces (p. ej. el título o "Ver en YouTube" ante un error).
+    var vars = { playsinline: 1, rel: 0, fs: 0, modestbranding: 1, iv_load_policy: 3 };
+    // origin = origen de esta página (https://<id de la app>, ver MainActivity.origenBase()).
+    // Si el WebView reportara "null" no se manda, para no dar un origen inválido.
+    if (window.location.origin && window.location.origin !== "null") vars.origin = window.location.origin;
+    new YT.Player(destino, {
+      videoId: idVideo, width: "100%", height: "100%", playerVars: vars,
+      events: { onError: function (e) { aviso.textContent = mensajeErrorVideo(e.data); } }
+    });
+  }
+  if (ytListo) { iniciar(); return; }
+  ytCola.push(iniciar);
+  cargarApiYoutube();
+  // Si en 8 s la API no llegó (sin internet, bloqueada), se avisa en vez de dejar el cuadro negro.
+  setTimeout(function () {
+    if (!ytListo) aviso.textContent = "No se pudo cargar el reproductor de YouTube. Revisa tu conexión.";
+  }, 8000);
+}
+
 // ---- Estado y pantallas ----
+var MATERIAS = [];
+var materiaId = null;
 var PREGUNTAS = [];
+var SECCIONES = [];      // grupos de preguntas consecutivas con la misma sección (ver agruparSecciones)
+var secIdx = 0;          // sección que se está mostrando
 var app = document.getElementById("app");
-var nombre = "", idx = 0, resp = [];
+var alumno = null;       // { matricula, nombre, grupo, reanudaciones } del alumno que accedió
+var matriculaEscrita = ""; // lo último que escribió en el campo (por si vuelve atrás)
+var resp = [];
+var avisoFaltantes = false; // true tras avisar de preguntas sin responder (el 2.º toque ya termina)
+
+// ---- Reloj ----
+var relojTimer = null;   // id del setInterval, o null si no corre
+var relojFin = 0;        // valor de performance.now() (ms) en que se acaba el tiempo
+var examenTerminado = false; // evita calificar dos veces (p. ej. botón + fin del tiempo a la vez)
 
 document.addEventListener("contextmenu", function (e) { e.preventDefault(); });
 
@@ -72,38 +331,189 @@ function el(tag, texto, clase) {
   if (clase) e.className = clase;
   return e;
 }
-function pantalla(card) { app.innerHTML = ""; app.appendChild(card); }
+function pantalla(card) { app.innerHTML = ""; app.appendChild(card); window.scrollTo(0, 0); }
+
+// Formatea milisegundos como mm:ss (o h:mm:ss si hay horas).
+function formatoTiempo(ms) {
+  var s = Math.max(0, Math.ceil(ms / 1000));
+  var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), seg = s % 60;
+  function dos(n) { return (n < 10 ? "0" : "") + n; }
+  return (h > 0 ? h + ":" : "") + dos(m) + ":" + dos(seg);
+}
+
+// Arranca el reloj con los SEGUNDOS RESTANTES que calculó el servidor (restanteSeg).
+// Al reanudar un intento (el alumno cerró la app) ese número ya viene descontado, así
+// el tiempo transcurrido con la app cerrada no se recupera. Se usa una HORA DE FIN y no un
+// contador que resta 1 cada segundo: así, si el WebView atrasa algún tick, el tiempo restante
+// sigue siendo correcto.
+// CAMBIO (2/oct/2026, 11): la hora de fin se mide con performance.now() (reloj monotónico,
+// que no cambia si el alumno modifica la hora del celular) en vez de Date.now(). El servidor
+// sigue siendo quien manda: si por cualquier motivo el reloj local se desviara, calificar_examen
+// responde "Tiempo agotado" pasado el margen.
+function iniciarReloj(restanteSeg) {
+  // Por seguridad, si quedó un intervalo anterior se limpia (evita relojes duplicados).
+  if (relojTimer) { clearInterval(relojTimer); relojTimer = null; }
+  var barra = document.getElementById("reloj");
+  if (!barra) {
+    barra = el("div");
+    barra.id = "reloj";
+    document.body.appendChild(barra);
+  }
+  barra.innerHTML = "";
+  var lineaTiempo = el("div", "", "reloj-tiempo");
+  barra.appendChild(lineaTiempo);
+  barra.appendChild(el("div", alumno.nombre + " · " + alumno.matricula + " · Grupo " + alumno.grupo, "reloj-alumno"));
+  document.body.classList.add("con-reloj");
+  relojFin = performance.now() + restanteSeg * 1000;
+  function tick() {
+    var restante = relojFin - performance.now();
+    lineaTiempo.textContent = "⏱ " + formatoTiempo(restante);
+    barra.className = restante <= 5 * 60 * 1000 ? "poco" : "";
+    if (restante <= 0) fin(true); // se acabó el tiempo: se entrega lo que haya
+  }
+  // El intervalo se registra ANTES del primer tick: si ese tick ya encuentra el tiempo vencido,
+  // fin() llama a detenerReloj() y debe poder limpiarlo (antes quedaba huérfano).
+  relojTimer = setInterval(tick, 1000);
+  tick();
+}
+
+// Detiene y quita el reloj de la pantalla.
+function detenerReloj() {
+  if (relojTimer) { clearInterval(relojTimer); relojTimer = null; }
+  var barra = document.getElementById("reloj");
+  if (barra) barra.parentNode.removeChild(barra);
+  document.body.classList.remove("con-reloj");
+}
+
+function elegirMateria() {
+  var c = el("div", "", "card");
+  c.appendChild(el("h1", "CheckMyKnowledge"));
+  c.appendChild(el("p", "Cargando materias disponibles..."));
+  pantalla(c);
+  cargarMaterias().then(function (filas) {
+    MATERIAS = filas;
+    var c2 = el("div", "", "card");
+    c2.appendChild(el("h1", "CheckMyKnowledge"));
+    if (!MATERIAS.length) {
+      c2.appendChild(el("p", "No hay ningún examen disponible en este momento. Pregúntale a tu profesor.", "aviso"));
+      pantalla(c2);
+      return;
+    }
+    c2.appendChild(el("p", "Elige la materia:"));
+    MATERIAS.forEach(function (m) {
+      var b = el("button", m.nombre);
+      b.onclick = function () { materiaId = m.id; inicio(); };
+      c2.appendChild(b);
+    });
+    pantalla(c2);
+  }).catch(function () {
+    var c3 = el("div", "", "card");
+    c3.appendChild(el("h1", "CheckMyKnowledge"));
+    c3.appendChild(el("p", "No se pudo conectar. Revisa tu conexión e inténtalo de nuevo.", "aviso"));
+    var b = el("button", "Reintentar");
+    b.onclick = elegirMateria;
+    c3.appendChild(b);
+    pantalla(c3);
+  });
+}
+
+// Agrupa las preguntas (ya ordenadas) en secciones: cada vez que cambia el
+// texto de "seccion" respecto a la pregunta anterior empieza un grupo nuevo.
+// Las preguntas sin sección que van seguidas forman un solo grupo sin título.
+// Cada grupo guarda los ÍNDICES en PREGUNTAS (así resp[] sigue siendo plano).
+function agruparSecciones(preguntas) {
+  var grupos = [];
+  preguntas.forEach(function (p, i) {
+    var ultimo = grupos[grupos.length - 1];
+    if (ultimo && ultimo.nombre === p.s) ultimo.indices.push(i);
+    else grupos.push({ nombre: p.s, indices: [i] });
+  });
+  return grupos;
+}
 
 function inicio() {
   var c = el("div", "", "card");
   c.appendChild(el("h1", "CheckMyKnowledge"));
-  c.appendChild(el("p", "Escribe tu nombre completo:"));
+  c.appendChild(el("p", "Escribe tu matrícula:"));
   var inp = el("input");
   inp.type = "text";
+  inp.setAttribute("inputmode", "numeric");
   inp.setAttribute("autocomplete", "off");
-  inp.value = nombre;
+  inp.value = matriculaEscrita;
   c.appendChild(inp);
-  c.appendChild(el("p", "Al comenzar no podrás salir, minimizar, cambiar de pantalla ni tomar capturas. Si lo haces, el examen se cierra y deberás empezar de nuevo.", "aviso"));
+  c.appendChild(el("p", "Tendrás " + DURACION_MIN + " minutos para contestar y solo un intento. Al terminar el tiempo, el examen se entrega solo con lo que lleves.", "aviso"));
+  // CAMBIO (2/oct/2026, 12): se avisa del límite de reanudaciones ANTES de empezar.
+  c.appendChild(el("p", "Al comenzar no podrás salir, minimizar, cambiar de pantalla ni tomar capturas. Si lo haces, la app se cierra: podrás volver a entrar con tu matrícula, pero el tiempo seguirá corriendo y tus respuestas se perderán. Solo puedes volver a entrar " + MAX_REANUDACIONES + " veces; a la siguiente, el examen se cierra con calificación 0.", "aviso"));
   var msg = el("p", "", "aviso");
   c.appendChild(msg);
   var b = el("button", "Comenzar examen");
   b.onclick = function () {
-    if (inp.value.trim().length < 3) { msg.textContent = "Escribe tu nombre."; return; }
-    nombre = inp.value.trim();
+    matriculaEscrita = inp.value.trim();
+    if (!matriculaEscrita) { msg.textContent = "Escribe tu matrícula."; return; }
     inp.blur();
     b.disabled = true;
-    b.textContent = "Cargando preguntas...";
+    b.textContent = "Verificando...";
     msg.textContent = "";
-    cargarPreguntas().then(function (preguntas) {
+    // Segundos que le quedan, según el servidor (al reanudar son menos que la duración total).
+    var restanteSeg = 0;
+    // Primero se inicia/reanuda el intento en el servidor (valida la matrícula); solo si
+    // procede se piden las preguntas. Los mensajes de rechazo no dan pistas de matrículas parecidas.
+    iniciarIntento(matriculaEscrita, materiaId).then(function (r) {
+      if (r.estado === "noregistrada") {
+        var e = new Error("no-registrada"); e.noRegistrada = true; throw e;
+      }
+      // CAMBIO (2/oct/2026, 12): cualquier estado que no sea "ok" (usado, agotado, anulado o uno
+      // desconocido de una versión futura del servidor) cierra el paso: NUNCA se abre el examen
+      // por un estado que esta app no entienda.
+      if (r.estado !== "ok") {
+        var e2 = new Error("intento"); e2.intento = r.estado; throw e2;
+      }
+      alumno = { matricula: r.matricula, nombre: r.nombre, grupo: r.grupo, reanudaciones: Number(r.reanudaciones) || 0 };
+      restanteSeg = Number(r.restante_seg);
+      // CAMBIO (2/oct/2026, 11): si el servidor dice que no queda tiempo (o manda algo que no es
+      // un número), no tiene sentido abrir el examen: se trata como tiempo agotado. Antes, un
+      // valor <= 0 arrancaba el reloj ya vencido y se entregaba en blanco sobre una pantalla rota.
+      if (!(restanteSeg > 0)) {
+        var e3 = new Error("intento"); e3.intento = "agotado"; throw e3;
+      }
+      b.textContent = "Cargando preguntas...";
+      return cargarPreguntas(materiaId, alumno.matricula);
+    }).then(function (preguntas) {
       if (!preguntas.length) throw new Error("No hay preguntas activas");
       PREGUNTAS = preguntas;
+      SECCIONES = agruparSecciones(preguntas);
       setTimeout(function () {
         if (window.Android) Android.iniciarExamen();
-        idx = 0; resp = [];
-        pregunta();
+        secIdx = 0;
+        // -1 = sin responder. Se usa -1 (y no un hueco/null) para que el arreglo
+        // enviado al servidor siempre lleve un número por pregunta; -1 nunca
+        // coincide con una opción correcta, así que cuenta como mala.
+        resp = PREGUNTAS.map(function () { return -1; });
+        examenTerminado = false;
+        avisoFaltantes = false;
+        // Primero se dibuja la pantalla y DESPUÉS arranca el reloj: así, si el reloj entregara
+        // el examen de inmediato, "Calificando..." no es pisado por pantallaSeccion().
+        pantallaSeccion();
+        iniciarReloj(restanteSeg);
       }, 300);
-    }).catch(function () {
-      msg.textContent = "No se pudieron cargar las preguntas. Revisa tu conexión e inténtalo de nuevo.";
+    }).catch(function (e) {
+      // Si falló la red DESPUÉS de crear el intento, el reloj del servidor ya corre:
+      // al reintentar, el alumno lo reanuda con el tiempo que le quede.
+      msg.textContent = e && e.noRegistrada
+        ? "Matrícula no registrada. Revísala o avisa a tu profesor."
+        : e && e.intento === "usado"
+        ? "Ya presentaste este examen. Si crees que es un error, avisa a tu profesor."
+        : e && e.intento === "agotado"
+        ? "Tu tiempo terminó mientras la app estaba cerrada y el examen se registró sin respuestas. Avisa a tu profesor."
+        : e && e.intento === "anulado"
+        ? "Saliste de la app más veces de las permitidas, así que el examen se cerró y se registró con calificación 0. Avisa a tu profesor."
+        : e && e.intento
+        ? "Este examen ya no está disponible. Avisa a tu profesor."
+        : e && /Reloj desajustado/.test(e.message)
+        ? "La hora de tu celular no es correcta. Actívala en automático (Ajustes > Fecha y hora) e inténtalo de nuevo."
+        : e && /Firma/.test(e.message)
+        ? "Esta versión de la app no está autorizada. Instala la versión más reciente que te dio tu profesor."
+        : "No se pudo continuar. Revisa tu conexión e inténtalo de nuevo.";
       b.disabled = false;
       b.textContent = "Comenzar examen";
     });
@@ -112,45 +522,156 @@ function inicio() {
   pantalla(c);
 }
 
-function pregunta() {
-  var p = PREGUNTAS[idx];
+// Arma el bloque de "contexto" que va arriba de una pregunta (si trae uno):
+// video de YouTube si se detecta un link, o un bloque de texto plano si no
+// (instrucciones, pasaje de lectura, etc.).
+//
+// Regresa { nodo, iniciar }: "nodo" es lo que se agrega a la pantalla; "iniciar"
+// (solo en videos) se llama DESPUÉS de que el nodo ya está en el documento, porque
+// la API de YouTube necesita encontrar el contenedor en pantalla para reemplazarlo
+// por el reproductor.
+function bloqueContexto(p) {
+  if (!p.x) return null;
+  var idVideo = extraerIdYoutube(p.x);
+  if (idVideo) {
+    var caja = el("div");
+    var envoltorio = el("div", "", "video-envoltorio");
+    var destino = el("div");
+    destino.id = "yt-destino-" + (++ytContador);
+    envoltorio.appendChild(destino);
+    var aviso = el("p", "", "video-aviso");
+    caja.appendChild(envoltorio);
+    caja.appendChild(aviso);
+    return { nodo: caja, iniciar: function () { crearReproductor(destino.id, idVideo, aviso); } };
+  }
+  return { nodo: el("div", p.x, "contexto-texto"), iniciar: null };
+}
+
+// Cuenta cuántas preguntas de TODO el examen siguen sin responder.
+function contarSinResponder() {
+  return resp.filter(function (r) { return r < 0; }).length;
+}
+
+// Muestra UNA sección completa: todas sus preguntas en la misma pantalla.
+// CAMBIO (2/oct/2026): antes se mostraba una pregunta por pantalla.
+// El contexto (video/texto) se muestra solo cuando cambia respecto a la
+// pregunta anterior de la sección; si 10 preguntas comparten un mismo video o
+// pasaje, aparece una vez arriba de ellas y no 10 veces.
+function pantallaSeccion() {
+  var g = SECCIONES[secIdx];
+  var esUltima = secIdx + 1 >= SECCIONES.length;
   var c = el("div", "", "card");
-  c.appendChild(el("p", "Pregunta " + (idx + 1) + " de " + PREGUNTAS.length));
-  c.appendChild(el("h1", p.t));
-  var sig = el("button", idx + 1 < PREGUNTAS.length ? "Siguiente" : "Terminar");
-  sig.disabled = resp[idx] === undefined;
-  p.o.forEach(function (txt, i) {
-    var b = el("button", String.fromCharCode(65 + i) + ") " + txt, "op" + (resp[idx] === i ? " sel" : ""));
-    b.onclick = function () {
-      resp[idx] = i;
-      var todos = c.querySelectorAll(".op");
-      for (var k = 0; k < todos.length; k++) todos[k].className = "op" + (k === i ? " sel" : "");
-      sig.disabled = false;
-    };
-    c.appendChild(b);
+  c.appendChild(el("p", "Sección " + (secIdx + 1) + " de " + SECCIONES.length + " · " + g.indices.length + " pregunta(s)"));
+  // CAMBIO (2/oct/2026, 12): si este intento ya se reanudó, se le recuerda al alumno cuántas
+  // reanudaciones lleva y que la siguiente salida de más cierra el examen con 0.
+  if (alumno && alumno.reanudaciones > 0) {
+    c.appendChild(el("p", "Reanudación " + alumno.reanudaciones + " de " + MAX_REANUDACIONES + " permitidas." +
+      (alumno.reanudaciones >= MAX_REANUDACIONES ? " Si vuelves a salir de la app, el examen se cerrará con calificación 0." : ""), "aviso"));
+  }
+  if (g.nombre) c.appendChild(el("p", g.nombre, "seccion-label"));
+
+  var iniciadores = [];   // funciones que arrancan los videos cuando la tarjeta ya está en pantalla
+  var contextoPrevio = null;
+
+  g.indices.forEach(function (qi) {
+    var p = PREGUNTAS[qi];
+    var bloque = el("div", "", "pregunta-bloque");
+    if (p.x && p.x !== contextoPrevio) {
+      var ctx = bloqueContexto(p);
+      bloque.appendChild(ctx.nodo);
+      if (ctx.iniciar) iniciadores.push(ctx.iniciar);
+    }
+    contextoPrevio = p.x || null;
+
+    bloque.appendChild(el("h2", (qi + 1) + ". " + p.t));
+    p.o.forEach(function (txt, i) {
+      var b = el("button", String.fromCharCode(65 + i) + ") " + txt, "op" + (resp[qi] === i ? " sel" : ""));
+      b.onclick = function () {
+        resp[qi] = i;
+        // Solo se repintan las opciones de ESTA pregunta (no se vuelve a dibujar
+        // la pantalla, para no reiniciar los videos).
+        var hermanas = bloque.querySelectorAll(".op");
+        for (var k = 0; k < hermanas.length; k++) hermanas[k].className = "op" + (k === i ? " sel" : "");
+      };
+      bloque.appendChild(b);
+    });
+    c.appendChild(bloque);
   });
+
+  var msg = el("p", avisoFaltantes && esUltima ? "Te faltan " + contarSinResponder() + " pregunta(s) sin responder. Revisa las secciones anteriores o toca de nuevo para terminar." : "", "aviso");
+  c.appendChild(msg);
+
+  if (secIdx > 0) {
+    var ant = el("button", "← Sección anterior", "sec");
+    ant.onclick = function () { secIdx--; pantallaSeccion(); };
+    c.appendChild(ant);
+  }
+  var sig = el("button", esUltima ? (avisoFaltantes ? "Terminar de todos modos" : "Terminar examen") : "Siguiente sección →");
   sig.onclick = function () {
-    if (idx + 1 < PREGUNTAS.length) { idx++; pregunta(); } else { fin(); }
+    if (!esUltima) { secIdx++; pantallaSeccion(); return; }
+    // Última sección: si faltan respuestas se avisa UNA vez (sin confirm(), que
+    // en el WebView no funciona y además robaría el foco y anularía el examen).
+    var faltan = contarSinResponder();
+    if (faltan > 0 && !avisoFaltantes) {
+      avisoFaltantes = true;
+      msg.textContent = "Te faltan " + faltan + " pregunta(s) sin responder. Revisa las secciones anteriores o toca de nuevo para terminar.";
+      sig.textContent = "Terminar de todos modos";
+      return;
+    }
+    fin(false);
   };
   c.appendChild(sig);
   pantalla(c);
+  // Los reproductores se crean hasta que la tarjeta ya está en pantalla (ver bloqueContexto).
+  iniciadores.forEach(function (f) { f(); });
 }
 
-function fin() {
+// Termina el examen (por botón o por fin del tiempo) y manda a calificar.
+// "porTiempo" solo cambia el texto que ve el alumno.
+function fin(porTiempo) {
+  if (examenTerminado) return; // ya se está calificando
+  examenTerminado = true;
+  detenerReloj();
   if (window.Android) Android.terminarExamen();
-  var bien = 0;
-  PREGUNTAS.forEach(function (p, i) { if (resp[i] === p.c) bien++; });
-  guardarResultado(nombre, bien, PREGUNTAS.length, resp);
   var c = el("div", "", "card");
-  c.appendChild(el("h1", "Examen terminado"));
-  c.appendChild(el("p", nombre + ": " + bien + " de " + PREGUNTAS.length + " correctas"));
-  var b = el("button", "Salir");
-  b.onclick = function () { if (window.Android) Android.salir(); else inicio(); };
-  c.appendChild(b);
+  c.appendChild(el("h1", "Calificando..."));
+  if (porTiempo) c.appendChild(el("p", "Se acabó el tiempo. Se entregan las respuestas que llevabas.", "aviso"));
+  c.appendChild(el("p", "Espera un momento."));
   pantalla(c);
+  intentarCalificar();
 }
 
-inicio();
+function intentarCalificar() {
+  calificarExamen(materiaId, alumno.matricula, resp).then(function (resultado) {
+    var c = el("div", "", "card");
+    c.appendChild(el("h1", "Examen terminado"));
+    c.appendChild(el("p", alumno.nombre + ": " + resultado.correctas + " de " + resultado.total + " correctas"));
+    var b = el("button", "Salir");
+    b.onclick = function () { if (window.Android) Android.salir(); else elegirMateria(); };
+    c.appendChild(b);
+    pantalla(c);
+  }).catch(function (e) {
+    // Errores DEFINITIVOS del servidor (tiempo vencido, intento ya cerrado): reintentar no
+    // sirve de nada, así que se ofrece salir en vez de "Reintentar". Cualquier otro error
+    // se trata como fallo de red y se puede reintentar (las respuestas siguen en memoria).
+    // "Firma" (app no autorizada) también es definitivo: reintentar no lo arregla.
+    // "Reloj desajustado" NO lo es: el alumno puede corregir la hora y reintentar.
+    var definitivo = !!(e && /Tiempo agotado|Intento ya utilizado|No hay un intento|Firma/.test(e.message));
+    var c = el("div", "", "card");
+    c.appendChild(el("h1", "No se pudo calificar"));
+    c.appendChild(el("p", definitivo
+      ? "Tu tiempo ya terminó, el intento se cerró o esta versión de la app no está autorizada. Avisa a tu profesor."
+      : e && /Reloj desajustado/.test(e.message)
+      ? "La hora de tu celular no es correcta. Actívala en automático (Ajustes > Fecha y hora) y toca Reintentar. Tus respuestas no se han perdido."
+      : "Revisa tu conexión e inténtalo de nuevo. Tus respuestas no se han perdido.", "aviso"));
+    var b = el("button", definitivo ? "Salir" : "Reintentar");
+    b.onclick = definitivo ? function () { if (window.Android) Android.salir(); else elegirMateria(); } : intentarCalificar;
+    c.appendChild(b);
+    pantalla(c);
+  });
+}
+
+elegirMateria();
 </script>
 </body>
 </html>
